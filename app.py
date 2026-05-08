@@ -14,11 +14,11 @@ from gpt_engine import (
 # Page setup
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Fantastic Beasts and Where to Find Them",
+    page_title="Fantastic Beasts",
     layout="wide"
 )
 
-st.title("Real Estate AI Prototype")
+st.title("Fantastic Beasts and Where to Find Them")
 st.caption(
     "Source files → snapshot metrics → core questions → asset management diagnosis"
 )

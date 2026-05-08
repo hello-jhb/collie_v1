@@ -14,7 +14,7 @@ from gpt_engine import (
 # Page setup
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Real Estate AI Prototype",
+    page_title="Fantastic Beasts and Where to Find Them",
     layout="wide"
 )
 

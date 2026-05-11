@@ -1,208 +1,484 @@
-def fmt_money(value):
+def normalize_text(value):
     if value is None:
-        return "N/A"
-    return f"${float(value):,.0f}"
+        return ""
+    return str(value).strip().lower()
 
 
-def fmt_pct(value):
-    if value is None:
-        return "N/A"
-    return f"{float(value):.1f}%"
+def get_extracted_metrics(flexible_result):
+    return flexible_result.get("extracted_metrics", [])
 
 
-def fmt_irr(value):
-    if value is None:
-        return "N/A"
-    value = float(value)
-    if value < 1:
-        value *= 100
-    return f"{value:.2f}%"
+def metric_matches(item, keywords):
+    text = " ".join([
+        normalize_text(item.get("metric_name")),
+        normalize_text(item.get("category")),
+        normalize_text(item.get("source_file")),
+        normalize_text(item.get("sheet")),
+    ])
+
+    return any(normalize_text(keyword) in text for keyword in keywords)
+
+
+def has_metric(metrics, keywords):
+    return any(metric_matches(item, keywords) for item in metrics)
+
+
+def has_layer_signal(metrics, layer_keywords):
+    return any(
+        any(normalize_text(keyword) in normalize_text(item.get("source_file")) for keyword in layer_keywords)
+        or any(normalize_text(keyword) in normalize_text(item.get("sheet")) for keyword in layer_keywords)
+        for item in metrics
+    )
+
+
+def available_metric_names(metrics, keywords):
+    names = []
+
+    for item in metrics:
+        if metric_matches(item, keywords):
+            name = item.get("metric_name")
+            if name and name not in names:
+                names.append(name)
+
+    return names
+
+
+def relationship_check(metrics):
+    """
+    Relationship-aware evidence checks.
+    This is stronger than metric presence alone.
+    """
+
+    has_actual = has_layer_signal(
+        metrics,
+        ["actual", "financial statement", "fs", "2021", "2022", "t12"]
+    )
+
+    has_plan = has_layer_signal(
+        metrics,
+        ["business plan", "budget", "bp", "forecast", "proforma"]
+    )
+
+    has_underwriting = has_layer_signal(
+        metrics,
+        ["acquisition", "underwriting", "uw"]
+    )
+
+    has_debt_source = has_layer_signal(
+        metrics,
+        ["debt", "loan", "dscr"]
+    )
+
+    has_leasing_source = has_layer_signal(
+        metrics,
+        ["rent roll", "lease", "tenant", "rollover"]
+    )
+
+    has_noi = has_metric(metrics, ["noi", "net operating income"])
+    has_revenue = has_metric(metrics, ["revenue", "income"])
+    has_expense = has_metric(metrics, ["expense", "opex", "operating expense"])
+    has_occupancy = has_metric(metrics, ["occupancy"])
+    has_variance = has_metric(metrics, ["variance", "budget vs actual"])
+
+    has_dscr = has_metric(metrics, ["dscr", "debt service coverage"])
+    has_debt_yield = has_metric(metrics, ["debt yield"])
+    has_ltv = has_metric(metrics, ["ltv", "loan to value"])
+    has_debt_service = has_metric(metrics, ["debt service", "loan payment"])
+    has_debt_balance = has_metric(metrics, ["debt balance", "loan balance", "outstanding debt"])
+
+    has_capex = has_metric(metrics, ["capex", "capital expenditure", "capital cost"])
+    has_capex_roi = has_metric(metrics, ["capex roi", "return on capex"])
+    has_yield_on_cost = has_metric(metrics, ["yield on cost"])
+    has_incremental_noi = has_metric(metrics, ["incremental noi"])
+    has_cost_to_complete = has_metric(metrics, ["cost to complete", "remaining cost"])
+
+    has_basis = has_metric(metrics, ["basis", "cost basis", "total basis"])
+    has_value = has_metric(metrics, ["value", "valuation", "market value"])
+    has_cap_rate = has_metric(metrics, ["cap rate", "capitalization rate"])
+    has_irr = has_metric(metrics, ["irr", "internal rate"])
+    has_equity_multiple = has_metric(metrics, ["equity multiple", "multiple"])
+
+    has_walt = has_metric(metrics, ["walt", "wale", "weighted average lease"])
+    has_tenant_concentration = has_metric(metrics, ["tenant concentration", "top tenant"])
+    has_delinquency = has_metric(metrics, ["delinquency", "bad debt", "credit loss"])
+    has_rollover = has_metric(metrics, ["rollover", "expiration", "lease expiry"])
+
+    return {
+        "layer_signals": {
+            "actuals_present": has_actual,
+            "business_plan_or_forecast_present": has_plan,
+            "acquisition_underwriting_present": has_underwriting,
+            "debt_source_present": has_debt_source,
+            "leasing_source_present": has_leasing_source,
+        },
+        "metric_signals": {
+            "noi": has_noi,
+            "revenue": has_revenue,
+            "expense": has_expense,
+            "occupancy": has_occupancy,
+            "variance": has_variance,
+            "dscr": has_dscr,
+            "debt_yield": has_debt_yield,
+            "ltv": has_ltv,
+            "debt_service": has_debt_service,
+            "debt_balance": has_debt_balance,
+            "capex": has_capex,
+            "capex_roi": has_capex_roi,
+            "yield_on_cost": has_yield_on_cost,
+            "incremental_noi": has_incremental_noi,
+            "cost_to_complete": has_cost_to_complete,
+            "basis": has_basis,
+            "value": has_value,
+            "cap_rate": has_cap_rate,
+            "irr": has_irr,
+            "equity_multiple": has_equity_multiple,
+            "walt": has_walt,
+            "tenant_concentration": has_tenant_concentration,
+            "delinquency": has_delinquency,
+            "rollover": has_rollover,
+        },
+    }
+
+
+def assess_question(question, available, missing, relationship_required, relationship_met, limitations):
+    metric_coverage_pct = len(available) / (len(available) + len(missing)) if (available or missing) else 0
+
+    if relationship_required and not relationship_met:
+        coverage = "partial" if metric_coverage_pct >= 0.4 else "low"
+    elif metric_coverage_pct >= 0.75:
+        coverage = "high"
+    elif metric_coverage_pct >= 0.4:
+        coverage = "partial"
+    else:
+        coverage = "low"
+
+    return {
+        "question": question,
+        "coverage": coverage,
+        "available_metrics": available,
+        "missing_metrics": missing,
+        "coverage_pct": round(metric_coverage_pct, 2),
+        "relationship_required": relationship_required,
+        "relationship_met": relationship_met,
+        "limitations": limitations,
+    }
 
 
 def core_question_coverage(flexible_result):
-    extracted_names = {
-        item["metric_name"].lower()
-        for item in flexible_result.get("extracted_metrics", [])
-    }
+    metrics = get_extracted_metrics(flexible_result)
+    signals = relationship_check(metrics)
 
-    def has_any(keywords):
-        return any(
-            any(keyword in name for name in extracted_names)
-            for keyword in keywords
-        )
-
-    checks = [
-        {
-            "question": "Are we performing vs plan?",
-            "required": ["NOI", "Revenue", "Expense", "Occupancy", "Variance"],
-            "available": [
-                "NOI" if has_any(["noi", "net operating income"]) else None,
-                "Revenue" if has_any(["revenue", "income"]) else None,
-                "Expense" if has_any(["expense", "opex"]) else None,
-                "Occupancy" if has_any(["occupancy"]) else None,
-            ],
-        },
-        {
-            "question": "Is the income durable?",
-            "required": ["WALT", "Occupancy", "Tenant Concentration", "Delinquency", "Rollover"],
-            "available": [
-                "WALT" if has_any(["walt", "wale"]) else None,
-                "Occupancy" if has_any(["occupancy"]) else None,
-                "Delinquency" if has_any(["delinquency", "bad debt"]) else None,
-                "Rollover" if has_any(["rollover", "expiration"]) else None,
-            ],
-        },
-        {
-            "question": "Is the leverage healthy?",
-            "required": ["DSCR", "Debt Yield", "LTV", "Debt Balance", "Debt Service"],
-            "available": [
-                "DSCR" if has_any(["dscr"]) else None,
-                "Debt Yield" if has_any(["debt yield"]) else None,
-                "LTV" if has_any(["ltv", "loan to value"]) else None,
-                "Debt / Loan" if has_any(["debt", "loan"]) else None,
-            ],
-        },
-        {
-            "question": "Is further capital justified?",
-            "required": ["CapEx", "CapEx ROI", "Yield on Cost", "Incremental NOI"],
-            "available": [
-                "CapEx" if has_any(["capex", "capital"]) else None,
-                "Yield on Cost" if has_any(["yield on cost"]) else None,
-                "Incremental NOI" if has_any(["incremental noi"]) else None,
-            ],
-        },
-        {
-            "question": "Is the asset worth its basis?",
-            "required": ["Basis", "Value", "Cap Rate", "IRR", "Equity Multiple"],
-            "available": [
-                "Basis" if has_any(["basis"]) else None,
-                "Value" if has_any(["value", "valuation"]) else None,
-                "Cap Rate" if has_any(["cap rate"]) else None,
-                "IRR" if has_any(["irr"]) else None,
-                "Equity Multiple" if has_any(["equity multiple"]) else None,
-            ],
-        },
-        {
-            "question": "Is risk increasing or decreasing over time?",
-            "required": ["NOI Trend", "Revenue Trend", "Expense Trend", "DSCR Trend", "Occupancy Trend"],
-            "available": [
-                "NOI" if has_any(["noi", "net operating income"]) else None,
-                "Revenue" if has_any(["revenue"]) else None,
-                "Expense" if has_any(["expense", "opex"]) else None,
-                "DSCR" if has_any(["dscr"]) else None,
-                "Occupancy" if has_any(["occupancy"]) else None,
-            ],
-        },
-    ]
+    layers = signals["layer_signals"]
+    m = signals["metric_signals"]
 
     results = []
 
-    for item in checks:
-        available = [x for x in item["available"] if x]
-        missing = [x for x in item["required"] if x not in available]
-        coverage_pct = len(available) / len(item["required"])
+    # 1. Are we performing vs plan?
+    available = []
+    missing = []
 
-        if coverage_pct >= 0.75:
-            coverage = "high"
-        elif coverage_pct >= 0.4:
-            coverage = "partial"
-        else:
-            coverage = "low"
+    for label, exists in [
+        ("NOI", m["noi"]),
+        ("Revenue", m["revenue"]),
+        ("Expense", m["expense"]),
+        ("Occupancy", m["occupancy"]),
+        ("Variance / Budget vs Actual", m["variance"]),
+    ]:
+        available.append(label) if exists else missing.append(label)
 
-        results.append({
-            "question": item["question"],
-            "coverage": coverage,
-            "available_metrics": available,
-            "missing_metrics": missing,
-        })
+    relationship_met = (
+        layers["actuals_present"]
+        and layers["business_plan_or_forecast_present"]
+        and (m["noi"] or m["revenue"] or m["expense"])
+    )
+
+    limitations = []
+    if not layers["actuals_present"]:
+        limitations.append("Actual operating data not clearly detected.")
+    if not layers["business_plan_or_forecast_present"]:
+        limitations.append("Business plan, budget, or forecast data not clearly detected.")
+    if not relationship_met:
+        limitations.append("Performance vs plan requires both actuals and plan/budget data for comparable periods.")
+
+    results.append(assess_question(
+        "Are we performing vs plan?",
+        available,
+        missing,
+        relationship_required=True,
+        relationship_met=relationship_met,
+        limitations=limitations,
+    ))
+
+    # 2. Is income durable?
+    available = []
+    missing = []
+
+    for label, exists in [
+        ("WALT / WALE", m["walt"]),
+        ("Occupancy", m["occupancy"]),
+        ("Tenant Concentration", m["tenant_concentration"]),
+        ("Delinquency / Bad Debt", m["delinquency"]),
+        ("Rollover / Expiration", m["rollover"]),
+    ]:
+        available.append(label) if exists else missing.append(label)
+
+    relationship_met = (
+        layers["leasing_source_present"]
+        and (m["walt"] or m["rollover"] or m["tenant_concentration"])
+    )
+
+    limitations = []
+    if not layers["leasing_source_present"]:
+        limitations.append("Rent roll, lease, or tenant-level source not clearly detected.")
+    if not relationship_met:
+        limitations.append("Income durability requires lease structure, rollover, tenant concentration, or tenant health data.")
+
+    results.append(assess_question(
+        "Is the income durable?",
+        available,
+        missing,
+        relationship_required=True,
+        relationship_met=relationship_met,
+        limitations=limitations,
+    ))
+
+    # 3. Is leverage healthy?
+    available = []
+    missing = []
+
+    for label, exists in [
+        ("DSCR", m["dscr"]),
+        ("Debt Yield", m["debt_yield"]),
+        ("LTV", m["ltv"]),
+        ("Debt Balance", m["debt_balance"]),
+        ("Debt Service", m["debt_service"]),
+    ]:
+        available.append(label) if exists else missing.append(label)
+
+    relationship_met = (
+        layers["debt_source_present"]
+        and (m["dscr"] or m["debt_yield"] or m["ltv"] or m["debt_service"])
+    )
+
+    limitations = []
+    if not layers["debt_source_present"]:
+        limitations.append("Debt model, loan statement, or debt schedule not clearly detected.")
+    if not relationship_met:
+        limitations.append("Leverage health requires debt terms and operating income / coverage metrics.")
+
+    results.append(assess_question(
+        "Is the leverage healthy?",
+        available,
+        missing,
+        relationship_required=True,
+        relationship_met=relationship_met,
+        limitations=limitations,
+    ))
+
+    # 4. Is further capital justified?
+    available = []
+    missing = []
+
+    for label, exists in [
+        ("CapEx", m["capex"]),
+        ("CapEx ROI", m["capex_roi"]),
+        ("Yield on Cost", m["yield_on_cost"]),
+        ("Incremental NOI", m["incremental_noi"]),
+        ("Cost to Complete", m["cost_to_complete"]),
+    ]:
+        available.append(label) if exists else missing.append(label)
+
+    relationship_met = (
+        m["capex"]
+        and (m["incremental_noi"] or m["capex_roi"] or m["yield_on_cost"])
+    )
+
+    limitations = []
+    if not m["capex"]:
+        limitations.append("CapEx spend or budget not detected.")
+    if not relationship_met:
+        limitations.append("Capital justification requires linking capital spend to incremental NOI, yield on cost, or value creation.")
+
+    results.append(assess_question(
+        "Is further capital justified?",
+        available,
+        missing,
+        relationship_required=True,
+        relationship_met=relationship_met,
+        limitations=limitations,
+    ))
+
+    # 5. Is the asset worth its basis?
+    available = []
+    missing = []
+
+    for label, exists in [
+        ("Basis", m["basis"]),
+        ("Value", m["value"]),
+        ("Cap Rate", m["cap_rate"]),
+        ("IRR", m["irr"]),
+        ("Equity Multiple", m["equity_multiple"]),
+    ]:
+        available.append(label) if exists else missing.append(label)
+
+    relationship_met = (
+        (layers["acquisition_underwriting_present"] or m["basis"])
+        and (m["value"] or m["cap_rate"] or m["irr"] or m["equity_multiple"])
+    )
+
+    limitations = []
+    if not layers["acquisition_underwriting_present"] and not m["basis"]:
+        limitations.append("Acquisition basis or cost basis not clearly detected.")
+    if not relationship_met:
+        limitations.append("Worth-basis analysis requires basis plus valuation or return metrics.")
+
+    results.append(assess_question(
+        "Is the asset worth its basis?",
+        available,
+        missing,
+        relationship_required=True,
+        relationship_met=relationship_met,
+        limitations=limitations,
+    ))
+
+    # 6. Is risk increasing or decreasing over time?
+    available = []
+    missing = []
+
+    for label, exists in [
+        ("NOI / NOI Trend", m["noi"]),
+        ("Revenue / Revenue Trend", m["revenue"]),
+        ("Expense / Expense Trend", m["expense"]),
+        ("DSCR / DSCR Trend", m["dscr"]),
+        ("Occupancy / Occupancy Trend", m["occupancy"]),
+    ]:
+        available.append(label) if exists else missing.append(label)
+
+    relationship_met = (
+        layers["actuals_present"]
+        and (m["noi"] or m["revenue"] or m["expense"] or m["dscr"] or m["occupancy"])
+    )
+
+    limitations = []
+    if not layers["actuals_present"]:
+        limitations.append("Actual time-series data not clearly detected.")
+    if not relationship_met:
+        limitations.append("Risk trend analysis requires metrics across time, not just a single static data point.")
+
+    results.append(assess_question(
+        "Is risk increasing or decreasing over time?",
+        available,
+        missing,
+        relationship_required=True,
+        relationship_met=relationship_met,
+        limitations=limitations,
+    ))
 
     return results
 
 
-def build_analysis_context(known_result, flexible_result=None):
-    acquisition = known_result["acquisition"]
-    actual_2021 = known_result["actual_2021"]
-    actual_2022 = known_result["actual_2022"]
-    bp_2022 = known_result["business_plan_2022"]
-    diagnosis = known_result["diagnosis"]
-    variance = diagnosis["variance_2022"]
+def summarize_extracted_metrics(flexible_result, limit=80):
+    extracted = flexible_result.get("extracted_metrics", [])
 
-    original_noi = acquisition["original_noi"]
-    actual_2021_noi = actual_2021["noi"]
+    simplified = []
 
-    noi_2021_var = actual_2021_noi - original_noi
-    noi_2021_var_pct = noi_2021_var / original_noi * 100 if original_noi else None
+    for item in extracted[:limit]:
+        simplified.append({
+            "metric_name": item.get("metric_name"),
+            "category": item.get("category"),
+            "value": item.get("value"),
+            "source_file": item.get("source_file"),
+            "sheet": item.get("sheet"),
+            "value_cell": item.get("value_cell"),
+            "confidence": item.get("confidence"),
+        })
 
-    acquisition_value = acquisition["implied_value_at_going_in_cap"]
-    value_2021 = actual_2021["implied_value_at_going_in_cap"]
-    value_2022 = actual_2022["implied_value_at_going_in_cap"]
+    return simplified
 
-    value_2021_change = value_2021 - acquisition_value
-    value_2022_change = value_2022 - acquisition_value
 
-    context = {
-        "headline_finding": "The property is underperforming the 2022 business plan primarily due to operating margin compression, not severe revenue collapse.",
-        "critical_metrics": {
-            "2022_revenue_variance_amount": variance["revenue_variance"],
-            "2022_revenue_variance_pct": variance["revenue_variance_pct"],
-            "2022_opex_variance_amount": variance["opex_variance"],
-            "2022_opex_variance_pct": variance["opex_variance_pct"],
-            "2022_noi_variance_amount": variance["noi_variance"],
-            "2022_noi_variance_pct": variance["noi_variance_pct"],
-            "acquisition_unlevered_irr": acquisition.get("unlevered_irr"),
-            "acquisition_levered_irr": acquisition.get("levered_irr"),
-            "bp_2022_unlevered_irr": bp_2022.get("bp_unlevered_irr"),
-            "bp_2022_levered_irr": bp_2022.get("bp_levered_irr"),
-        },
-        "acquisition_vs_2021": {
-            "underwritten_noi": original_noi,
-            "actual_2021_noi": actual_2021_noi,
-            "variance_amount": noi_2021_var,
-            "variance_pct": noi_2021_var_pct,
-            "acquisition_implied_value": acquisition_value,
-            "actual_2021_implied_value": value_2021,
-            "value_change": value_2021_change,
-        },
-        "bp_2022_vs_actual_2022": {
-            "bp_2022_ytd_noi": bp_2022["noi"],
-            "actual_2022_ytd_noi": actual_2022["noi"],
-            "bp_2022_ytd_revenue": bp_2022["revenue"],
-            "actual_2022_ytd_revenue": actual_2022["revenue"],
-            "bp_2022_ytd_opex": bp_2022["opex"],
-            "actual_2022_ytd_opex": actual_2022["opex"],
-            "variance": variance,
-        },
-        "value_implication": {
-            "acquisition_implied_value": acquisition_value,
-            "actual_2021_implied_value": value_2021,
-            "actual_2022_annualized_implied_value": value_2022,
-            "value_change_2021_vs_acquisition": value_2021_change,
-            "value_change_2022_vs_acquisition": value_2022_change,
-            "cap_rate_assumption": "same going-in cap rate",
-        },
-        "expense_leaks": diagnosis["top_expense_leaks"],
-        "metric_catalog_coverage": None,
-        "core_question_coverage": None,
+def summarize_missing_metrics(flexible_result, limit=80):
+    missing = flexible_result.get("missing_metrics", [])
+
+    high_priority = [
+        item for item in missing
+        if normalize_text(item.get("priority")) == "high"
+    ]
+
+    selected = high_priority[:limit] if high_priority else missing[:limit]
+
+    simplified = []
+
+    for item in selected:
+        simplified.append({
+            "metric_name": item.get("metric_name"),
+            "category": item.get("category"),
+            "definition": item.get("definition"),
+            "priority": item.get("priority"),
+            "source": item.get("source"),
+        })
+
+    return simplified
+
+
+def assess_file_signal(flexible_result):
+    total_metrics = flexible_result.get("total_metrics", 0)
+    extracted_count = flexible_result.get("extracted_count", 0)
+
+    if total_metrics == 0:
+        return {
+            "status": "catalog_error",
+            "message": "Metric catalog did not load correctly."
+        }
+
+    if extracted_count == 0:
+        return {
+            "status": "no_metrics_found",
+            "message": (
+                "No recognizable real estate metrics were extracted from the uploaded files. "
+                "The files may be blank, unsupported, or not relevant to the current metric catalog."
+            )
+        }
+
+    if extracted_count < 5:
+        return {
+            "status": "very_limited_data",
+            "message": (
+                "Only a small number of metrics were extracted. "
+                "Analysis should be treated as highly preliminary."
+            )
+        }
+
+    return {
+        "status": "metrics_found",
+        "message": "Metric extraction produced enough signal for preliminary analysis."
     }
 
-    if flexible_result:
-        context["metric_catalog_coverage"] = {
-            "total_metrics": flexible_result.get("total_metrics"),
-            "extracted_count": flexible_result.get("extracted_count"),
-            "missing_count": flexible_result.get("missing_count"),
-            "missing_high_priority_metrics": [
-                item for item in flexible_result.get("missing_metrics", [])
-                if item.get("priority") in ["High", "high"]
-            ][:20],
-        }
-        context["core_question_coverage"] = core_question_coverage(flexible_result)
 
-    return context
+def generate_performance_analysis(flexible_result):
+    metrics = get_extracted_metrics(flexible_result)
 
+    coverage = core_question_coverage(flexible_result)
+    file_signal = assess_file_signal(flexible_result)
+    relationships = relationship_check(metrics)
 
-def generate_performance_analysis(known_result, flexible_result=None):
-    """
-    Returns structured evidence only.
-    GPT should generate the narrative from this object.
-    """
-    return build_analysis_context(known_result, flexible_result)
+    analysis_context = {
+        "analysis_mode": "generalized_relationship_aware_extraction",
+        "file_signal": file_signal,
+        "metric_catalog_coverage": {
+            "total_metrics": flexible_result.get("total_metrics", 0),
+            "extracted_count": flexible_result.get("extracted_count", 0),
+            "missing_count": flexible_result.get("missing_count", 0),
+        },
+        "relationship_signals": relationships,
+        "core_question_coverage": coverage,
+        "extracted_metrics_sample": summarize_extracted_metrics(flexible_result),
+        "missing_metrics_sample": summarize_missing_metrics(flexible_result),
+        "instruction_to_gpt": (
+            "Generate preliminary asset management analysis only from available extracted metrics. "
+            "If data is insufficient, say so clearly. Explain what can and cannot be assessed. "
+            "Do not invent financial values or assume missing underwriting, business plan, actual, debt, or leasing data. "
+            "Pay attention to whether relationships exist, not just whether individual metrics are present."
+        ),
+    }
+
+    return analysis_context

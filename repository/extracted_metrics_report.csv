@@ -1,0 +1,40 @@
+metric_id,metric_name,category,definition,value,source_file,sheet,label_cell,value_cell,matched_alias,confidence,match_method
+purchase_price,Purchase Price,Valuation & Returns,Acquisition purchase price,25507408.695652176,UW.xlsx,Assumption,B9,D9,Purchase Price,high,playbook
+total_basis,Total Basis,Valuation & Returns,All-in cost basis,30097781.92394145,UW.xlsx,Assumption,B12,D12,Total Basis,high,playbook
+exit_cap_rate,Exit Cap Rate,Valuation & Returns,Projected cap rate at exit,0.06,UW.xlsx,Assumption,B15,D15,Exit Cap Rate,high,playbook
+exit_value,Exit Value,Valuation & Returns,Projected sale price at exit,38975694.008088954,UW.xlsx,Assumption,B17,D17,Exit Value,high,playbook
+forward_noi,Forward NOI,Operating Performance,Projected stabilized NOI,2338541.640485337,UW.xlsx,Assumption,B16,D16,Forward NOI,high,playbook
+debt_amount,Debt Amount,Debt & Leverage,Total loan amount at closing,13978444.09998864,UW.xlsx,Assumption,B23,D23,Debt Amount,high,playbook
+total_debt,Total Debt,Debt & Leverage,Total debt including future fundings,18058669.15436487,UW.xlsx,Assumption,B25,D25,Total Debt,high,playbook
+original_ltv,Original LTV,Debt & Leverage,LTV at acquisition,0.6,UW.xlsx,Assumption,B22,D22,Original LTV,high,playbook
+interest_rate,Interest Rate,Debt & Leverage,Loan interest rate / spread,0.035,UW.xlsx,Assumption,B31,D31,Interest Rate,high,playbook
+loan_maturity,Loan Maturity,Debt & Leverage,Loan maturity date or term,36.0,UW.xlsx,Assumption,B28,D28,Loan Maturity,high,playbook
+capex_ti_lc_budget,CapEx / TI/LC Budget,CapEx & Capital Allocation,"Total capital budget including CapEx, TI, and LC",4080225.0543762296,UW.xlsx,Assumption,B24,D24,CapEx / TI/LC Budget,high,playbook
+loan_balance,Loan Balance,Debt & Leverage,Current outstanding loan balance,13978444.09998864,UW.xlsx,Proforma,B52,F52,Loan Balance,high,playbook
+unlevered_irr,Unlevered IRR,Valuation & Returns,Unlevered internal rate of return,0.12361383527686676,UW.xlsx,Proforma,B43,F43,Unlevered IRR,high,playbook
+levered_irr,Levered IRR,Valuation & Returns,Levered internal rate of return,0.17524732884510708,UW.xlsx,Proforma,B61,F61,Levered IRR,high,playbook
+equity_multiple,Equity Multiple,Valuation & Returns,Equity return multiple,2.0795793369502746,UW.xlsx,Proforma,B62,F62,Equity Multiple,high,playbook
+debt_yield,Debt Yield,Debt & Leverage,NOI / Loan Balance (calculated),0.1673,UW.xlsx,Assumption,,,Debt Yield,high,calculated
+current_ltv,Current LTV,Debt & Leverage,Loan Balance / Current Value (calculated),0.3586,UW.xlsx,Assumption,,,Current LTV,high,calculated
+revenue,Revenue,Operating Performance,Total operating revenue,2688868.77,FS21.xlsx,2021,C39,D39:O39,Revenue,high,playbook
+operating_expenses,Operating Expenses,Operating Performance,Total operating expenses,1470324.14,FS21.xlsx,2021,C147,D147:O147,Operating Expenses,high,playbook
+noi,NOI,Operating Performance,Net Operating Income,1218544.6300000001,FS21.xlsx,2021,C148,D148:O148,NOI,high,playbook
+repair_maintenance_expense,Repair & Maintenance Expense,Expense Detail,,329259.33,FS21.xlsx,2021,C73,D73:O73,Repair & Maintenance Expense,high,playbook
+utilities_expense,Utilities Expense,Expense Detail,,497256.23999999993,FS21.xlsx,2021,C83,D83:O83,Utilities Expense,high,playbook
+property_tax_expense,Property Tax Expense,Expense Detail,,400427.66000000003,FS21.xlsx,2021,C93,D93:O93,Property Tax Expense,high,playbook
+property_insurance_expense,Property Insurance Expense,Expense Detail,,132620.46,FS21.xlsx,2021,C100,D100:O100,Property Insurance Expense,high,playbook
+property_management_expense,Property Management Expense,Expense Detail,,71599.59,FS21.xlsx,2021,C105,D105:O105,Property Management Expense,high,playbook
+administrative_expense,Administrative Expense,Expense Detail,,-9621.750000000004,FS21.xlsx,2021,C116,D116:O116,Administrative Expense,high,playbook
+leasing_marketing_expense,Leasing & Marketing Expense,Expense Detail,,250.0,FS21.xlsx,2021,C122,D122:O122,Leasing & Marketing Expense,high,playbook
+professional_service_expense,Professional Service Expense,Expense Detail,,566.57,FS21.xlsx,2021,C145,D145:K145,Professional Service Expense,high,playbook
+monthly_revenue,Monthly Revenue,Operating Performance,Monthly revenue series,"[188269.48, 216247.97, 128004.21, 227648.95, 219190.41, 253802.51, 210597.42, 243563.95, 235514.46, 259837.64, 267600.3, 238591.47]",FS21.xlsx,2021,C39,,Monthly Revenue,high,monthly_series
+monthly_expenses,Monthly Expenses,Operating Performance,Monthly expenses series,"[82596.95, 108996.15, 108783.56, 115321.95, 159768.64, 65522.72, 151531.92, 174576.09, 131083.81, 84586.67, 176705.53, 110850.15]",FS21.xlsx,2021,C147,,Monthly Expenses,high,monthly_series
+monthly_noi,Monthly NOI,Operating Performance,Monthly noi series,"[105672.53, 107251.82, 19220.65, 112327.0, 59421.77, 188279.79, 59065.5, 68987.86, 104430.65, 175250.97, 90894.77, 127741.32]",FS21.xlsx,2021,C148,,Monthly NOI,high,monthly_series
+bp_exit_value,BP Exit Value,Valuation & Returns,Business plan exit value,47686813.61469184,BP.xlsx,Assumption,B17,D17,BP Exit Value,high,playbook
+dscr_debt_coverage_ratio,DSCR / Debt Coverage Ratio,Debt & Leverage,NOI / Annual Debt Service,1.25,BP.xlsx,Assumption,B33,D33,DSCR / Debt Coverage Ratio,high,playbook
+bp_unlevered_irr,BP Unlevered IRR,Valuation & Returns,Business plan unlevered IRR,0.1664688386485973,BP.xlsx,Proforma,B47,F47,BP Unlevered IRR,high,playbook
+bp_levered_irr,BP Levered IRR,Valuation & Returns,Business plan levered IRR,0.2549457856149313,BP.xlsx,Proforma,B68,F68,BP Levered IRR,high,playbook
+bp_equity_multiple,BP Equity Multiple,Valuation & Returns,Business plan equity multiple,2.7916858011846832,BP.xlsx,Proforma,B69,F69,BP Equity Multiple,high,playbook
+debt_service,Debt Service,Debt & Leverage,Annual debt service payment,-11709551.287207184,BP.xlsx,Proforma,B61,F61,Debt Service,high,playbook
+capex_ti_lc_spent,CapEx / TI/LC Spent,CapEx & Capital Allocation,Sum of TI + LC + CapEx in Proforma 'Actual' columns,278118.38,BP.xlsx,Proforma,B11,,CapEx / TI/LC Spent,high,proforma_actual_sum
+capex_ti_lc_forecast_remaining,CapEx / TI/LC Forecast Remaining,CapEx & Capital Allocation,Sum of TI + LC + CapEx in Proforma 'Forecast' columns,5251427.87,BP.xlsx,Proforma,B11,,CapEx / TI/LC Forecast Remaining,high,proforma_forecast_sum

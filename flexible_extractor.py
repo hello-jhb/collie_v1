@@ -28,46 +28,103 @@ def cell_address(row, col):
     return openpyxl.utils.get_column_letter(col) + str(row)
 
 
+def _find_sheet_total_col(ws, max_scan_rows=15):
+    """
+    Detect a 'Total / Annual / YTD / Full Year / T12' column header in the first
+    few rows of the sheet. Returns the column index or None.
+    """
+    total_keywords = ["total", "annual", "ytd", "full year", "year total", "t12"]
+    for r in range(1, max_scan_rows + 1):
+        for c in range(1, ws.max_column + 1):
+            txt = normalize_text(ws.cell(row=r, column=c).value)
+            if any(kw == txt or kw in txt.split() for kw in total_keywords):
+                return c
+    return None
+
+
 def find_nearby_value(ws, row, col):
     """
     Search nearby cells for a value.
     Priority:
-    1. Same row, cells to the right
-    2. Same column, cells below
-    3. Small surrounding area
+    0. If the row looks like a time-series (6+ numeric cells to the right of the label),
+       prefer the value under a 'Total / Annual / YTD' column header; otherwise sum
+       the monthly cells. This handles financial-statement rows like
+       'TOTAL OPERATING REVENUE | Jan | Feb | ... | Dec | Total'.
+    1. Same row, cells to the right — prefer non-zero (handles Sources/Uses tables
+       where the first numeric column ('At Close') can legitimately be zero while
+       the meaningful value sits one or two columns further right).
+    2. Same column, cells below — same non-zero preference.
+    3. Small surrounding area — same non-zero preference.
     """
 
-    # Look right
-    for offset in range(1, 6):
-        value = ws.cell(row=row, column=col + offset).value
-        if is_numeric(value):
-            return value, cell_address(row, col + offset), "right"
+    # --- Step 0: time-series-aware path ---
+    # Scan up to 20 cells to the right of the label and count numeric values.
+    numeric_right = []
+    for offset in range(1, 21):
+        c = col + offset
+        if c > ws.max_column:
+            break
+        v = ws.cell(row=row, column=c).value
+        if is_numeric(v):
+            numeric_right.append((v, c))
+
+    if len(numeric_right) >= 6:
+        # This is a monthly/quarterly time-series row.
+        total_col = _find_sheet_total_col(ws)
+        if total_col and total_col > col:
+            tot_val = ws.cell(row=row, column=total_col).value
+            if is_numeric(tot_val) and tot_val != 0:
+                return tot_val, cell_address(row, total_col), "total_col"
+        # No populated total column — sum the period cells (excluding the total col itself)
+        period_vals = [v for v, c in numeric_right if c != total_col]
+        if period_vals:
+            row_sum = sum(period_vals)
+            first_c = period_vals and numeric_right[0][1]
+            last_c  = period_vals and [c for v, c in numeric_right if c != total_col][-1]
+            return row_sum, f"{cell_address(row, first_c)}:{cell_address(row, last_c)}", "row_sum"
+
+    # --- Step 1: look right, prefer non-zero ---
+    zero_fallback = None
+    for value, c in numeric_right[:7]:
+        if value != 0:
+            return value, cell_address(row, c), "right"
+        if zero_fallback is None:
+            zero_fallback = (value, cell_address(row, c), "right")
 
     # Look below
     for offset in range(1, 6):
         value = ws.cell(row=row + offset, column=col).value
         if is_numeric(value):
-            return value, cell_address(row + offset, col), "below"
+            if value != 0:
+                return value, cell_address(row + offset, col), "below"
+            if zero_fallback is None:
+                zero_fallback = (value, cell_address(row + offset, col), "below")
 
     # Look nearby grid
     for r_offset in range(-2, 4):
         for c_offset in range(-2, 6):
             r = row + r_offset
             c = col + c_offset
-
             if r < 1 or c < 1:
                 continue
-
             value = ws.cell(row=r, column=c).value
             if is_numeric(value):
-                return value, cell_address(r, c), "nearby"
+                if value != 0:
+                    return value, cell_address(r, c), "nearby"
+                if zero_fallback is None:
+                    zero_fallback = (value, cell_address(r, c), "nearby")
+
+    # All nearby values were zero — return that rather than nothing
+    if zero_fallback is not None:
+        return zero_fallback
 
     return None, None, None
 
 
-def scan_workbook_for_metric(file_path, metric):
+def scan_workbook_for_metric(file_path, metric, relevant_tabs=None):
     """
     Search one Excel workbook for one metric.
+    If relevant_tabs is provided, scan those sheets first; fall back to all sheets if none match.
     Returns best match or None.
     """
 
@@ -79,7 +136,12 @@ def scan_workbook_for_metric(file_path, metric):
     aliases = metric.get("aliases", [])
     matches = []
 
-    for sheet_name in wb.sheetnames:
+    if relevant_tabs:
+        sheets_to_scan = [s for s in relevant_tabs if s in wb.sheetnames] or wb.sheetnames
+    else:
+        sheets_to_scan = wb.sheetnames
+
+    for sheet_name in sheets_to_scan:
         ws = wb[sheet_name]
 
         for row in ws.iter_rows():
@@ -103,7 +165,15 @@ def scan_workbook_for_metric(file_path, metric):
                         )
 
                         if value is not None:
-                            confidence = "high" if direction in ["right", "below"] else "medium"
+                            # Confidence tiering — time-series-aware methods are strongest
+                            # because they read the actual annual total or sum, not a
+                            # single adjacent cell which may be a section header neighbor.
+                            if direction in ["total_col", "row_sum"]:
+                                confidence = "high"
+                            elif direction in ["right", "below"]:
+                                confidence = "high"
+                            else:
+                                confidence = "medium"
 
                             matches.append({
                                 "metric_id": metric["metric_id"],
@@ -123,18 +193,46 @@ def scan_workbook_for_metric(file_path, metric):
     if not matches:
         return None
 
-    # Prefer high confidence matches first
+    # Priority:
+    # 1. Match method — time-series methods (total_col / row_sum) read the annual
+    #    figure; "right" / "below" read a single adjacent cell; "nearby" is last resort.
+    # 2. Alias specificity — longer aliases are more specific (e.g. "Total Operating
+    #    Revenue" beats "Revenue" so a generic match doesn't outrank a precise one).
+    # 3. Confidence tier.
+    method_priority = {"total_col": 0, "row_sum": 1, "right": 2, "below": 3, "nearby": 4}
     matches = sorted(
         matches,
-        key=lambda x: 0 if x["confidence"] == "high" else 1
+        key=lambda x: (
+            method_priority.get(x["match_method"], 99),
+            -len(x.get("matched_alias") or ""),
+            0 if x["confidence"] == "high" else 1,
+        )
     )
 
     return matches[0]
 
 
-def scan_uploaded_files(upload_dir=UPLOAD_DIR):
+def build_tabs_lookup(classification_result):
+    """
+    Build a dict of {file_name: [relevant_tabs]} from a classification result.
+    """
+    if not classification_result:
+        return {}
+
+    lookup = {}
+    for item in classification_result.get("classifications", []):
+        file_name = item.get("file_name")
+        tabs = item.get("relevant_tabs") or []
+        if file_name and tabs:
+            lookup[file_name] = tabs
+
+    return lookup
+
+
+def scan_uploaded_files(upload_dir=UPLOAD_DIR, classification_result=None):
     """
     Scan all uploaded Excel files against the metric catalog.
+    Uses relevant_tabs from classification_result to focus scanning per file.
     """
 
     upload_dir = Path(upload_dir)
@@ -144,6 +242,8 @@ def scan_uploaded_files(upload_dir=UPLOAD_DIR):
 
     excel_files = list(upload_dir.glob("*.xlsx")) + list(upload_dir.glob("*.xlsm"))
 
+    tabs_lookup = build_tabs_lookup(classification_result)
+
     extracted = []
     missing = []
 
@@ -151,7 +251,8 @@ def scan_uploaded_files(upload_dir=UPLOAD_DIR):
         best_match = None
 
         for file_path in excel_files:
-            match = scan_workbook_for_metric(file_path, metric)
+            relevant_tabs = tabs_lookup.get(file_path.name)
+            match = scan_workbook_for_metric(file_path, metric, relevant_tabs=relevant_tabs)
 
             if match:
                 best_match = match

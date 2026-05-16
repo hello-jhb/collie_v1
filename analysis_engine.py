@@ -471,12 +471,37 @@ def summarize_extracted_metrics(flexible_result, limit=80):
             "category": item.get("category"),
             "value": item.get("value"),
             "source_file": item.get("source_file"),
+            "source_layer": item.get("source_layer"),
             "sheet": item.get("sheet"),
             "value_cell": item.get("value_cell"),
             "confidence": item.get("confidence"),
         })
 
     return simplified
+
+
+def organize_metrics_by_layer(flexible_result):
+    """
+    Group extracted metrics by source layer (acquisition_underwriting, business_plan,
+    actuals_2021, actuals_2022, etc.) so the narrative can present them chronologically.
+    """
+    if not flexible_result:
+        return {}
+
+    metrics = flexible_result.get("extracted_metrics", []) or []
+    by_layer = {}
+
+    for item in metrics:
+        layer = item.get("source_layer", "unknown")
+        by_layer.setdefault(layer, []).append({
+            "metric_name": item.get("metric_name"),
+            "value": item.get("value"),
+            "source_file": item.get("source_file"),
+            "sheet": item.get("sheet"),
+            "value_cell": item.get("value_cell"),
+        })
+
+    return by_layer
 
 
 def summarize_missing_metrics(flexible_result, limit=80):
@@ -620,6 +645,7 @@ def generate_performance_analysis(flexible_result):
         "relationship_signals": relationships,
         "core_question_coverage": coverage,
         "extracted_metrics_sample": summarize_extracted_metrics(flexible_result),
+        "metrics_by_source_layer": organize_metrics_by_layer(flexible_result),
         "missing_metrics_sample": summarize_missing_metrics(flexible_result),
         "calculated_metrics": {
             "current_ltv": calculated_ltv,
@@ -627,10 +653,14 @@ def generate_performance_analysis(flexible_result):
         } if calculated_ltv else {},
         "instruction_to_gpt": (
             "Generate preliminary asset management analysis only from available extracted metrics. "
-            "If data is insufficient, say so clearly. Explain what can and cannot be assessed. "
-            "Do not invent financial values or assume missing underwriting, business plan, actual, debt, or leasing data. "
-            "Pay attention to whether relationships exist, not just whether individual metrics are present. "
-            "When discussing leverage (LTV), distinguish between going-in LTV (from underwriting) and current LTV (calculated from current debt and property value)."
+            "Use the `metrics_by_source_layer` to present a chronological narrative: "
+            "acquisition_underwriting (original plan) → actuals_2021 (Year 1 actual) → "
+            "business_plan (revised plan) → actuals_2022 (Year 2 actual). "
+            "For the Acquisition Underwriting section, ALWAYS report: going-in basis (purchase price + closing costs + initial CapEx), "
+            "planned NOI, planned IRR, exit value, and debt structure (LTV). These are fixed historical assumptions. "
+            "For each Financial Statement year, compare actual NOI/revenue/expenses against the planned (UW or BP) values. "
+            "If data is insufficient for a section, say so but do not invent values. "
+            "When discussing leverage (LTV), distinguish between going-in LTV (from underwriting) and current LTV (calculated)."
         ),
     }
 

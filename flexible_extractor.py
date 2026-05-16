@@ -132,9 +132,34 @@ def scan_workbook_for_metric(file_path, metric):
     return matches[0]
 
 
+def classify_file_layer(file_name):
+    """
+    Classify a file by its investment lifecycle layer based on its name.
+    Returns one of: 'acquisition_underwriting', 'business_plan', 'actuals_2021',
+    'actuals_2022', 'actuals_recent', or 'unknown'.
+    """
+    name_lower = file_name.lower()
+
+    if "acquisition" in name_lower or "underwriting" in name_lower or " uw" in name_lower or "_uw" in name_lower:
+        return "acquisition_underwriting"
+    if "business plan" in name_lower or "bp" in name_lower or "budget" in name_lower or "forecast" in name_lower:
+        return "business_plan"
+    if "financial statement" in name_lower or "fs " in name_lower or "actual" in name_lower or "t12" in name_lower:
+        if "2021" in name_lower:
+            return "actuals_2021"
+        if "2022" in name_lower:
+            return "actuals_2022"
+        if "2023" in name_lower:
+            return "actuals_2023"
+        return "actuals_recent"
+    return "unknown"
+
+
 def scan_uploaded_files(upload_dir=UPLOAD_DIR):
     """
     Scan all uploaded Excel files against the metric catalog.
+    Extracts each metric from EVERY file where found, tagged by source layer,
+    so the analysis can compare underwriting vs business plan vs actuals.
     """
 
     upload_dir = Path(upload_dir)
@@ -148,17 +173,17 @@ def scan_uploaded_files(upload_dir=UPLOAD_DIR):
     missing = []
 
     for metric in catalog:
-        best_match = None
+        all_matches = []
 
         for file_path in excel_files:
             match = scan_workbook_for_metric(file_path, metric)
 
             if match:
-                best_match = match
-                break
+                match["source_layer"] = classify_file_layer(file_path.name)
+                all_matches.append(match)
 
-        if best_match:
-            extracted.append(best_match)
+        if all_matches:
+            extracted.extend(all_matches)
         else:
             missing.append({
                 "metric_id": metric["metric_id"],

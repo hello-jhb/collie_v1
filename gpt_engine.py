@@ -88,19 +88,40 @@ def generate_asset_management_narrative(analysis_context):
         return "[Narrative generation requires OPENAI_API_KEY environment variable]"
 
     prompt = {
-        "task": "Generate a preliminary asset management assessment from the structured evidence.",
+        "task": "Generate a preliminary asset management assessment following a clear chronological narrative: what was planned at acquisition, how year 1 actually performed vs plan, what was revised in year 2 plan, and how year 2 actually performed.",
         "desired_output_style": (
             "Write in clear, flowing, executive-level prose. "
-            "Do not over-index on missing metrics. "
-            "Start with what can be said from available evidence, then explain limitations and next actions."
+            "Follow the chronological structure rigorously. "
+            "Distinguish between planned (underwriting/business plan) and actual (financial statements). "
+            "Always lead each section with the key underwritten/planned metrics (these are FIXED and should always be extracted and reported). "
+            "Only skip a section if the source document is completely missing."
         ),
         "desired_structure": [
-            "One-line preliminary read",
-            "What the available evidence suggests",
-            "Most important operating / capital issue",
-            "Implication for value, leverage, or returns",
-            "Recommended next AM actions",
-            "Brief limitations / data to validate"
+            "## Original Investment Thesis (Acquisition Underwriting)",
+            "  - Going-in basis: purchase price, closing costs, initial CapEx/TI/LC total",
+            "  - Planned NOI, IRR, and exit value",
+            "  - Debt structure (LTV, term, rate)",
+            "",
+            "## Year 1 Actual Performance (2021 Financial Statement vs Underwriting)",
+            "  - What was 2021 actual NOI, revenue, expenses?",
+            "  - Did it track the underwriting plan? What were the variance drivers (occupancy, expenses, tenant changes)?",
+            "",
+            "## Revised Plan (2022 Business Plan - what changed from underwriting)",
+            "  - What assumptions were updated? (NOI expectations, capital allocation, exit value)",
+            "  - Is the revised plan more or less aggressive than original?",
+            "",
+            "## Year 2 Actual vs Revised Plan (2022 Financial Statement vs 2022 Business Plan)",
+            "  - What was 2022 actual NOI, revenue, expenses?",
+            "  - Is performance tracking the revised plan? What are variance drivers?",
+            "",
+            "## Current Investment Status",
+            "  - Income durability assessment (lease terms, tenant concentration, rollover risk)",
+            "  - Leverage health (DSCR, LTV, debt yield)",
+            "  - Whether current basis is justified by current and projected returns",
+            "  - Risk trajectory (improving, stable, or deteriorating?)",
+            "",
+            "## Recommended Next AM Actions",
+            "  - 3-5 specific action items"
         ],
         "analysis_context": analysis_context,
     }

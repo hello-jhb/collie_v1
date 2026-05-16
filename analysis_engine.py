@@ -545,12 +545,69 @@ def assess_file_signal(flexible_result):
     }
 
 
+def calculate_current_ltv(metrics):
+    """
+    Calculate Current LTV from extracted metrics: Current Loan Balance ÷ Current Property Value
+    Returns (ltv_value, source_info) or (None, None) if insufficient data
+    """
+    # Get latest loan balance (from actual financials or business plan)
+    loan_balance = None
+    loan_source = None
+    for item in metrics:
+        metric_name = normalize_text(item.get("metric_name", ""))
+        if any(x in metric_name for x in ["debt balance", "outstanding debt", "loan balance"]):
+            # Prefer actuals over business plan
+            if "actual" in normalize_text(item.get("source_file", "")) or "2022" in item.get("source_file", ""):
+                loan_balance = item.get("value")
+                loan_source = item.get("source_file")
+                break
+            elif loan_balance is None:
+                loan_balance = item.get("value")
+                loan_source = item.get("source_file")
+
+    # Get current property value (implied from NOI + cap rate, or use exit value)
+    property_value = None
+    value_source = None
+    for item in metrics:
+        metric_name = normalize_text(item.get("metric_name", ""))
+        # Look for exit value from business plan (most recent valuation)
+        if "exit value" in metric_name and "2022" in item.get("source_file", ""):
+            property_value = item.get("value")
+            value_source = item.get("source_file")
+            break
+
+    # If no exit value, try to calculate from NOI and cap rate
+    if property_value is None:
+        noi = None
+        cap_rate = None
+        for item in metrics:
+            metric_name = normalize_text(item.get("metric_name", ""))
+            if "noi" in metric_name and not "expense" in metric_name:
+                noi = item.get("value")
+            elif "cap rate" in metric_name:
+                cap_rate = item.get("value")
+
+        if noi and cap_rate and cap_rate > 0:
+            property_value = noi / cap_rate
+            value_source = "Calculated from NOI ÷ Cap Rate"
+
+    # Calculate LTV if we have both components
+    if loan_balance and property_value and property_value > 0:
+        ltv = loan_balance / property_value
+        return ltv, f"Current: {loan_source} loan balance ÷ {value_source if value_source else 'property value'}"
+
+    return None, None
+
+
 def generate_performance_analysis(flexible_result):
     metrics = get_extracted_metrics(flexible_result)
 
     coverage = core_question_coverage(flexible_result)
     file_signal = assess_file_signal(flexible_result)
     relationships = relationship_check(metrics)
+
+    # Calculate current LTV if possible
+    calculated_ltv, ltv_source = calculate_current_ltv(metrics)
 
     analysis_context = {
         "analysis_mode": "generalized_relationship_aware_extraction",
@@ -564,11 +621,16 @@ def generate_performance_analysis(flexible_result):
         "core_question_coverage": coverage,
         "extracted_metrics_sample": summarize_extracted_metrics(flexible_result),
         "missing_metrics_sample": summarize_missing_metrics(flexible_result),
+        "calculated_metrics": {
+            "current_ltv": calculated_ltv,
+            "current_ltv_source": ltv_source,
+        } if calculated_ltv else {},
         "instruction_to_gpt": (
             "Generate preliminary asset management analysis only from available extracted metrics. "
             "If data is insufficient, say so clearly. Explain what can and cannot be assessed. "
             "Do not invent financial values or assume missing underwriting, business plan, actual, debt, or leasing data. "
-            "Pay attention to whether relationships exist, not just whether individual metrics are present."
+            "Pay attention to whether relationships exist, not just whether individual metrics are present. "
+            "When discussing leverage (LTV), distinguish between going-in LTV (from underwriting) and current LTV (calculated from current debt and property value)."
         ),
     }
 

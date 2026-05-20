@@ -50,7 +50,12 @@ def _get_client() -> OpenAI | None:
     return _client
 
 
-MODEL = "gpt-4o"
+# Routing model: handles "which tool to call next" decisions during follow-up
+# Q&A. Mini is ~3x faster and ~10x cheaper than gpt-4o for this kind of work,
+# and the routing decisions are simple ("call get_layer_details with this arg").
+# The actual narrative generation still uses gpt-4o (in scenarios/_llm.py),
+# which is what we care about for output quality.
+MODEL = "gpt-4o-mini"
 MAX_TOOL_ITERATIONS = 10  # cap on tool calls per single user message
 
 

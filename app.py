@@ -20,7 +20,15 @@ from pathlib import Path
 import streamlit as st
 
 import ssot
+import tools
 from agent_loop import AgentSession, SCENARIO_CONFIG
+
+
+# Which scenario tool to run deterministically per scenario key.
+_SCENARIO_RUNNER = {
+    "deal_review": tools.run_deal_review,
+    "perf_vs_plan": tools.run_perf_vs_plan,
+}
 
 
 # =============================================================================
@@ -116,9 +124,31 @@ for key, default in [
     ("agent_session", None),
     ("uploaded_filenames", set()),
     ("last_auto_message", None),
+    # Files whose auto-classification failed and are awaiting a user choice.
+    # Shape: {filename: error_message}
+    ("pending_overrides", {}),
+    # Set of batches (frozensets of filenames) we've already run the scenario for,
+    # so we don't re-trigger on every Streamlit rerun.
+    ("completed_batches", set()),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+# Layer options the user can pick from the manual-override dropdown.
+# Ordered to put the most common choices first.
+_MANUAL_LAYER_OPTIONS = [
+    "acquisition_underwriting",
+    "business_plan",
+    "actuals_2020",
+    "actuals_2021",
+    "actuals_2022",
+    "actuals_2023",
+    "actuals_2024",
+    "actuals_2025",
+    "rent_roll",
+    "debt",
+]
 
 
 # =============================================================================
@@ -135,6 +165,8 @@ def _wipe_uploads_and_reset_ssot() -> None:
                 pass
     ssot.reset_ssot()
     st.session_state.uploaded_filenames = set()
+    st.session_state.pending_overrides = {}
+    st.session_state.completed_batches = set()
 
 
 def _activate_scenario(scenario_key: str) -> None:
@@ -297,25 +329,16 @@ def render_scenario() -> None:
         key=f"upload_{scenario_key}",
     )
 
-    # New-batch detection: if the uploader's filenames differ from what we've
-    # tracked in this session, save the new ones and queue an auto-message
-    # to the agent telling it to ingest them.
-    auto_trigger_message: str | None = None
-
+    # Detect a new upload batch (different filenames than what we've already
+    # processed in this session). Save the new files to disk.
+    new_files = []
     if uploaded:
         current_names = {f.name for f in uploaded}
         if current_names != st.session_state.uploaded_filenames:
-            # Save new files to disk
             new_files = [f for f in uploaded if f.name not in st.session_state.uploaded_filenames]
             for uf in new_files:
                 (UPLOAD_DIR / uf.name).write_bytes(uf.getbuffer())
-
             st.session_state.uploaded_filenames = current_names
-            file_list = ", ".join(sorted(current_names))
-            auto_trigger_message = (
-                f"I have uploaded these files: {file_list}. "
-                f"Please ingest them and run the {cfg['display_name']} analysis."
-            )
 
     # SSOT panel
     with st.expander("📂 SSOT — Asset record", expanded=False):
@@ -323,24 +346,49 @@ def render_scenario() -> None:
 
     st.divider()
 
-    # Chat history
+    # Replay chat history so the workspace looks consistent across reruns.
     for m in agent.display_messages():
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    # Auto-trigger after file upload (only fires once per new batch)
-    if auto_trigger_message and auto_trigger_message != st.session_state.last_auto_message:
-        st.session_state.last_auto_message = auto_trigger_message
-        with st.chat_message("user"):
-            st.markdown(auto_trigger_message)
-        with st.chat_message("assistant"):
-            with st.spinner("Reading files and running analysis..."):
-                reply = agent.send(auto_trigger_message)
-            st.markdown(reply)
-        _render_tool_trace(agent)
+    # ---------------------------------------------------------------------
+    # Deterministic orchestration — 3 phases, each idempotent across reruns.
+    # ---------------------------------------------------------------------
 
-    # User chat input
-    user_input = st.chat_input("Ask a question about this analysis...")
+    # Phase 1: ingest any new files (queues manual-override candidates).
+    if new_files:
+        _ingest_new_files(new_files)
+
+    # Phase 2: if files need manual classification, show the override form
+    # and stop — we can't run the scenario until layers are resolved.
+    if st.session_state.pending_overrides:
+        _render_manual_override_ui()
+        # Still allow follow-up Q&A while waiting on overrides
+        user_input = st.chat_input("Ask a follow-up question...")
+        _handle_chat_input(agent, user_input)
+        return
+
+    # Phase 3: run the scenario if we haven't already for this batch.
+    if st.session_state.uploaded_filenames:
+        batch_id = frozenset(st.session_state.uploaded_filenames)
+        if batch_id not in st.session_state.completed_batches:
+            _run_scenario_for_batch(agent, scenario_key)
+
+    # User chat input — this is where the agent earns its keep (Q&A).
+    user_input = st.chat_input("Ask a follow-up question...")
+    _handle_chat_input(agent, user_input)
+
+
+def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:
+    if not user_input:
+        return
+    with st.chat_message("user"):
+        st.markdown(user_input)
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            reply = agent.send(user_input)
+        st.markdown(reply)
+    _render_tool_trace(agent)
     if user_input:
         with st.chat_message("user"):
             st.markdown(user_input)
@@ -349,6 +397,161 @@ def render_scenario() -> None:
                 reply = agent.send(user_input)
             st.markdown(reply)
         _render_tool_trace(agent)
+
+
+def _ingest_new_files(new_files: list) -> None:
+    """
+    Phase 1: ingest each newly-uploaded file. Files whose auto-classification
+    fails are stashed in st.session_state.pending_overrides for the user to
+    resolve via the override form.
+    """
+    pseudo_user_msg = "Uploaded: " + ", ".join(sorted(f.name for f in new_files))
+    with st.chat_message("user"):
+        st.markdown(pseudo_user_msg)
+
+    failed_to_classify: dict[str, str] = {}
+
+    with st.chat_message("assistant"):
+        with st.status("Ingesting files...", expanded=True) as status:
+            for uf in new_files:
+                status.update(label=f"Ingesting {uf.name}...")
+                result = tools.ingest_to_ssot(uf.name)
+                if result.get("needs_manual_classification"):
+                    failed_to_classify[uf.name] = result.get("error", "")
+                    st.markdown(f"⚠️ **{uf.name}** — needs manual classification")
+                elif "error" in result:
+                    st.markdown(f"❌ **{uf.name}** — {result['error']}")
+                else:
+                    st.markdown(
+                        f"✅ **{uf.name}** → `{result['layer']}` "
+                        f"({result['metric_count']} metrics extracted)"
+                    )
+
+            if failed_to_classify:
+                status.update(
+                    label=f"{len(failed_to_classify)} file(s) need manual classification",
+                    state="error",
+                )
+            else:
+                status.update(label="Ingest complete", state="complete")
+
+    if failed_to_classify:
+        st.session_state.pending_overrides = failed_to_classify
+
+
+def _run_scenario_for_batch(agent: AgentSession, scenario_key: str) -> None:
+    """
+    Phase 3: readiness check + scenario run. Idempotent: marks the batch as
+    completed when done so reruns don't repeat the work.
+    """
+    pseudo_user_msg = "Uploaded: " + ", ".join(sorted(st.session_state.uploaded_filenames))
+
+    with st.chat_message("assistant"):
+        with st.status("Generating analysis...", expanded=True) as status:
+            readiness = tools.check_scenario_ready(scenario_key)
+            if not readiness.get("ready"):
+                status.update(label="More data needed", state="error")
+                missing_msg = (
+                    f"**Can't run {SCENARIO_CONFIG[scenario_key]['display_name']} yet.**\n\n"
+                    f"{readiness.get('reason', 'Missing required layers.')}\n\n"
+                    f"- Layers in SSOT now: `{readiness.get('layers_present', [])}`\n"
+                    f"- Example of what's still needed: `{readiness.get('example_missing', [])}`"
+                )
+                st.markdown(missing_msg)
+                _seed_agent_history(agent, pseudo_user_msg, missing_msg, [], None)
+                st.session_state.completed_batches.add(frozenset(st.session_state.uploaded_filenames))
+                return
+
+            runner = _SCENARIO_RUNNER[scenario_key]
+            scenario_result = runner()
+
+            if "error" in scenario_result:
+                status.update(label="Analysis failed", state="error")
+                err_msg = f"**Couldn't generate the analysis:** {scenario_result['error']}"
+                st.markdown(err_msg)
+                _seed_agent_history(agent, pseudo_user_msg, err_msg, [], None)
+                st.session_state.completed_batches.add(frozenset(st.session_state.uploaded_filenames))
+                return
+
+            status.update(label="Done", state="complete")
+
+        st.markdown(scenario_result["narrative"])
+
+    st.session_state.completed_batches.add(frozenset(st.session_state.uploaded_filenames))
+    _seed_agent_history(agent, pseudo_user_msg, scenario_result["narrative"], [], scenario_result)
+
+
+def _render_manual_override_ui() -> None:
+    """Show a form letting the user classify any files that auto-classification missed."""
+    scenario_key = st.session_state.active_scenario
+    st.divider()
+    st.markdown("### Manual classification")
+    st.caption(
+        "These files couldn't be classified by name. Tell me what each one is, "
+        "and I'll ingest them into the right SSOT layer."
+    )
+
+    # Suggest a sensible default based on the active scenario.
+    default_layer = {
+        "deal_review": "acquisition_underwriting",
+        "perf_vs_plan": "actuals_2022",
+    }.get(scenario_key, "acquisition_underwriting")
+
+    with st.form(key="manual_override_form"):
+        choices: dict[str, str] = {}
+        for filename in sorted(st.session_state.pending_overrides):
+            choices[filename] = st.selectbox(
+                f"📄 {filename}",
+                options=_MANUAL_LAYER_OPTIONS,
+                index=_MANUAL_LAYER_OPTIONS.index(default_layer),
+                key=f"override_{filename}",
+            )
+        submitted = st.form_submit_button("Ingest with these layers", type="primary")
+
+    if submitted:
+        # Run the override ingests.
+        with st.status("Ingesting with manual layers...", expanded=True) as status:
+            for filename, layer in choices.items():
+                status.update(label=f"Ingesting {filename} as {layer}...")
+                result = tools.ingest_to_ssot_with_layer(filename, layer)
+                if "error" in result:
+                    st.error(f"❌ {filename}: {result['error']}")
+                else:
+                    st.markdown(f"✅ **{filename}** → `{layer}` ({result['metric_count']} metrics)")
+            status.update(label="Done", state="complete")
+
+        # Clear the override queue and invalidate the completed-batches cache so
+        # the scenario runs on the next rerun (which happens automatically after form submit).
+        st.session_state.pending_overrides = {}
+        st.session_state.completed_batches = set()
+        st.rerun()
+
+
+def _seed_agent_history(
+    agent: AgentSession,
+    user_msg: str,
+    assistant_msg: str,
+    ingest_results: list[dict],
+    scenario_result: dict | None,
+) -> None:
+    """
+    Append the work-just-done into the agent's message history so it has full
+    context for any follow-up Q&A. The agent won't re-run ingest or scenario
+    because it can see they already happened.
+    """
+    # Build a tool-summary line so the agent knows what's in SSOT.
+    layers_now = ssot.list_layers()
+    context_note = (
+        f"[System: I (the host app) already ingested the uploaded files and "
+        f"ran the scenario. Current SSOT layers: {layers_now}. "
+        f"Do not call ingest_to_ssot or run_<scenario> again for these files. "
+        f"For follow-up questions, use get_layer_details or get_ssot_summary.]"
+    )
+    agent.messages.append({"role": "user", "content": user_msg})
+    agent.messages.append({"role": "assistant", "content": assistant_msg})
+    agent.messages.append({"role": "user", "content": context_note})
+    # Have the model acknowledge so the next true user message lands cleanly.
+    agent.messages.append({"role": "assistant", "content": "Acknowledged. Ready for follow-up questions."})
 
 
 def _render_tool_trace(agent: AgentSession) -> None:

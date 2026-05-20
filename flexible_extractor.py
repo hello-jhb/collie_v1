@@ -65,10 +65,82 @@ def find_nearby_value(ws, row, col):
     return None, None, None
 
 
+def scan_workbook_for_all_metrics(file_path, catalog):
+    """
+    Load the workbook ONCE and scan all catalog metrics in a single pass.
+
+    This is the fast path used by v2's tools.extract_from_file. It replaces
+    the prior pattern of calling scan_workbook_for_metric in a loop, which
+    re-loaded the same Excel file once per metric (≈97x per file).
+
+    Returns {metric_id: best_match_dict_or_None} for every metric in the catalog.
+    """
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception:
+        return {m["metric_id"]: None for m in catalog}
+
+    # Pre-normalize every alias once, paired with its parent metric.
+    # Each entry: (normalized_alias_text, metric_dict, original_alias_string)
+    alias_index = []
+    for metric in catalog:
+        for alias in metric.get("aliases", []):
+            alias_text = normalize_text(alias)
+            if alias_text:
+                alias_index.append((alias_text, metric, alias))
+
+    matches_by_metric: dict = {m["metric_id"]: [] for m in catalog}
+    file_name = Path(file_path).name
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        for row in ws.iter_rows():
+            for cell in row:
+                cell_text = normalize_text(cell.value)
+                if not cell_text:
+                    continue
+
+                for alias_text, metric, original_alias in alias_index:
+                    if alias_text in cell_text:
+                        value, value_cell, direction = find_nearby_value(
+                            ws, cell.row, cell.column
+                        )
+                        if value is None:
+                            continue
+                        confidence = "high" if direction in ("right", "below") else "medium"
+                        matches_by_metric[metric["metric_id"]].append({
+                            "metric_id": metric["metric_id"],
+                            "metric_name": metric["metric_name"],
+                            "category": metric["category"],
+                            "definition": metric["definition"],
+                            "value": value,
+                            "source_file": file_name,
+                            "sheet": sheet_name,
+                            "label_cell": cell.coordinate,
+                            "value_cell": value_cell,
+                            "matched_alias": original_alias,
+                            "confidence": confidence,
+                            "match_method": direction,
+                        })
+
+    # Best match per metric (high-confidence first).
+    best = {}
+    for metric_id, matches in matches_by_metric.items():
+        if not matches:
+            best[metric_id] = None
+        else:
+            matches.sort(key=lambda x: 0 if x["confidence"] == "high" else 1)
+            best[metric_id] = matches[0]
+    return best
+
+
 def scan_workbook_for_metric(file_path, metric):
     """
     Search one Excel workbook for one metric.
     Returns best match or None.
+
+    NOTE: kept for backward compatibility with v1 modules. The fast path is
+    scan_workbook_for_all_metrics, which avoids reloading the workbook per metric.
     """
 
     try:
@@ -137,21 +209,55 @@ def classify_file_layer(file_name):
     Classify a file by its investment lifecycle layer based on its name.
     Returns one of: 'acquisition_underwriting', 'business_plan', 'actuals_2021',
     'actuals_2022', 'actuals_recent', or 'unknown'.
+
+    Keyword groups reflect institutional RE naming conventions:
+      - 'proforma' / 'pro forma' is the most common name for an UW model
+      - 'BP' alone is risky (matches too much) so we anchor with word boundaries
+      - financial statements: 'fs', 'financial', 'p&l', 'income statement',
+        'operating statement', 't12'
     """
     name_lower = file_name.lower()
 
-    if "acquisition" in name_lower or "underwriting" in name_lower or " uw" in name_lower or "_uw" in name_lower:
-        return "acquisition_underwriting"
-    if "business plan" in name_lower or "bp" in name_lower or "budget" in name_lower or "forecast" in name_lower:
-        return "business_plan"
-    if "financial statement" in name_lower or "fs " in name_lower or "actual" in name_lower or "t12" in name_lower:
-        if "2021" in name_lower:
-            return "actuals_2021"
-        if "2022" in name_lower:
-            return "actuals_2022"
-        if "2023" in name_lower:
-            return "actuals_2023"
+    # --- Financial Statements / actuals (check first; "2022 P&L" should NOT
+    # match business plan via the year). ---
+    # We pad with leading/trailing spaces so " fs " matches "FS 2022.xlsx"
+    padded = f" {name_lower} "
+    actuals_keywords = [
+        "financial statement", "income statement", "operating statement",
+        "p&l", "pl statement", "actual", "actuals",
+        " fs ", "_fs_", "_fs.", " fs.", "t12", "trailing 12",
+    ]
+    if any(kw in padded for kw in actuals_keywords):
+        for year in ("2020", "2021", "2022", "2023", "2024", "2025"):
+            if year in name_lower:
+                return f"actuals_{year}"
         return "actuals_recent"
+
+    # --- Acquisition Underwriting (proforma / UW model / deal memo) ---
+    uw_keywords = [
+        "acquisition", "underwriting",
+        "proforma", "pro forma", "pro-forma",
+        "uw model", "deal memo",
+    ]
+    # Word-boundary check for the short token " uw" (avoid matching "answer"!)
+    uw_token_match = (
+        " uw" in name_lower or "_uw" in name_lower
+        or name_lower.endswith(" uw") or name_lower.endswith("_uw")
+    )
+    if any(kw in name_lower for kw in uw_keywords) or uw_token_match:
+        return "acquisition_underwriting"
+
+    # --- Business Plan (revised plan post-acquisition) ---
+    bp_keywords = [
+        "business plan", "budget", "forecast", "revised plan",
+        "annual plan", "asset plan", "hold plan",
+    ]
+    if any(kw in name_lower for kw in bp_keywords):
+        return "business_plan"
+    # " bp " as a standalone token (so "abp_2022.xlsx" doesn't false-match)
+    if " bp " in name_lower or "_bp_" in name_lower or "_bp." in name_lower or " bp." in name_lower:
+        return "business_plan"
+
     return "unknown"
 
 

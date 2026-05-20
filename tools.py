@@ -21,7 +21,10 @@ from typing import Any
 
 import ssot
 from metric_catalog import load_metric_catalog
-from flexible_extractor import scan_workbook_for_metric, classify_file_layer
+from flexible_extractor import (
+    scan_workbook_for_all_metrics,
+    classify_file_layer,
+)
 
 
 UPLOAD_DIR = Path("uploads")
@@ -72,10 +75,10 @@ def extract_from_file(filename: str) -> dict[str, Any]:
         }
 
     catalog = load_metric_catalog()
-    extracted = []
+    matches_by_id = scan_workbook_for_all_metrics(file_path, catalog)
 
-    for metric in catalog:
-        match = scan_workbook_for_metric(file_path, metric)
+    extracted = []
+    for match in matches_by_id.values():
         if match:
             extracted.append({
                 "metric_name": match["metric_name"],
@@ -106,11 +109,26 @@ def ingest_to_ssot(filename: str) -> dict[str, Any]:
     if layer == "unknown":
         return {
             "error": (
-                f"Could not classify '{filename}' from its name. "
-                "Rename it to include something like 'Acquisition Underwriting', "
-                "'Business Plan', or 'Financial Statement 2022'."
+                f"Could not auto-classify '{filename}' from its name. "
+                "Either rename it (e.g. add 'Acquisition Underwriting', "
+                "'Business Plan', or 'Financial Statement 2022' to the filename) "
+                "or use the manual layer-override below."
             ),
+            "needs_manual_classification": True,
+            "filename": filename,
         }
+
+    return ingest_to_ssot_with_layer(filename, layer)
+
+
+def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
+    """
+    Manual-override variant: skip classification, write to the user-specified
+    layer. Used when the auto-classifier returns 'unknown' and the user picks
+    the right layer from a dropdown.
+    """
+    if layer not in ssot.KNOWN_LAYERS:
+        return {"error": f"Unknown layer: {layer!r}. Valid: {sorted(ssot.KNOWN_LAYERS)}"}
 
     extraction = extract_from_file(filename)
     if "error" in extraction:

@@ -196,45 +196,35 @@ def load_metric_catalog(path=CATALOG_PATH):
         if not metric_name:
             continue
 
-        category = get_col(row, col_map, ["Category"])
-        definition = get_col(row, col_map, ["Definition"])
-        formula = get_col(row, col_map, ["Formula", "Calculation Method"])
-        data_format = get_col(row, col_map, ["Data Format", "Format"])
-        source_type = get_col(row, col_map, ["Source Type", "Source", "Required Source Type"])
-        system = get_col(row, col_map, ["System"])
-        stakeholder = get_col(row, col_map, ["Who Cares", "Stakeholder", "User"])
+        category     = get_col(row, col_map, ["Category"])
+        definition   = get_col(row, col_map, ["Definition"])
+        formula      = get_col(row, col_map, ["Formula", "Calculation Method"])
+        source_type  = get_col(row, col_map, ["Source Type", "Source", "Required Source Type"])
         aliases_text = get_col(row, col_map, ["Aliases", "Search Terms"])
-        layer_text = get_col(row, col_map, ["Layer", "Layers"])
-        core_question = get_col(row, col_map, ["Core Question", "Used For Core Question"])
-        priority = get_col(row, col_map, ["Priority"])
-        dashboard_flag = get_col(row, col_map, ["Dashboard Flag", "Dashboard", "Show on Dashboard"])
-        extraction_notes = get_col(row, col_map, ["Extraction Notes", "Notes"])
+        core_question= get_col(row, col_map, ["Core Question", "Used For Core Question"])
+        priority     = get_col(row, col_map, ["Priority"])
+        # New columns added during v2 catalog cleanup
+        data_nature  = get_col(row, col_map, ["Data Nature", "data_nature"])
+        metric_source= get_col(row, col_map, ["Metric Source", "metric_source"]) or "extracted"
 
         aliases = build_aliases(metric_name, aliases_text)
-
-        layers = split_list(layer_text)
-        if not layers:
-            layers = infer_layers(source_type, metric_name)
 
         if not priority:
             priority = infer_priority(metric_name, category)
 
         metric = {
-            "metric_id": make_metric_id(metric_name),
-            "metric_name": metric_name,
-            "category": category,
-            "definition": definition,
-            "formula": formula,
-            "data_format": data_format,
-            "source": source_type,
-            "system": system,
-            "stakeholder": stakeholder,
-            "layers": layers,
-            "aliases": aliases,
+            "metric_id":     make_metric_id(metric_name),
+            "metric_name":   metric_name,
+            "category":      category,
+            "definition":    definition,
+            "formula":       formula,
+            "source":        source_type,
+            "aliases":       aliases,
             "core_question": core_question,
-            "priority": priority,
-            "dashboard_flag": dashboard_flag,
-            "extraction_notes": extraction_notes,
+            "priority":      priority,
+            # v2 fields
+            "data_nature":   data_nature,   # projection | actual | mixed
+            "metric_source": metric_source, # extracted | calculated
         }
 
         catalog.append(metric)

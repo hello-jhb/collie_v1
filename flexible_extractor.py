@@ -65,6 +65,42 @@ def find_nearby_value(ws, row, col):
     return None, None, None
 
 
+# Which data_nature values are relevant per SSOT layer.
+# "mixed" metrics are always included (meaningful in both projection and actual contexts).
+_LAYER_DATA_NATURE: dict[str, set] = {
+    "underwriting":    {"projection", "mixed"},
+    "business_plan":   {"projection", "actual", "mixed"},
+    "actuals_2020":    {"actual", "mixed"},
+    "actuals_2021":    {"actual", "mixed"},
+    "actuals_2022":    {"actual", "mixed"},
+    "actuals_2023":    {"actual", "mixed"},
+    "actuals_2024":    {"actual", "mixed"},
+    "actuals_2025":    {"actual", "mixed"},
+    "actuals_recent":  {"actual", "mixed"},
+    "rent_roll":       {"actual", "mixed"},
+    "debt":            {"actual", "mixed"},
+}
+
+
+def filter_catalog_for_layer(catalog: list, layer: str) -> list:
+    """
+    Return only the metrics relevant to a given SSOT layer.
+
+    Two filters applied:
+    1. Skip calculated metrics (metric_source == "calculated") — these are
+       derived after extraction, not extracted from cells.
+    2. Keep only metrics whose data_nature matches the layer's expected type.
+       e.g. an underwriting file should not be scanned for Current LTV or DSCR
+       (those are actual/current-state metrics).
+    """
+    allowed_natures = _LAYER_DATA_NATURE.get(layer, {"projection", "actual", "mixed"})
+    return [
+        m for m in catalog
+        if m.get("metric_source", "extracted") == "extracted"
+        and m.get("data_nature", "mixed") in allowed_natures
+    ]
+
+
 def scan_workbook_for_all_metrics(file_path, catalog):
     """
     Load the workbook ONCE and scan all catalog metrics in a single pass.

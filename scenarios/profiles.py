@@ -32,14 +32,15 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     "deal_review": {
         "description": (
             "Summarize the acquisition thesis from the underwriting layer. "
-            "Going-in basis, planned returns, exit assumption, and the "
-            "going-in debt structure (not current debt health)."
+            "Going-in basis, the full projected cash flow waterfall, planned "
+            "returns, exit assumption, and going-in debt structure."
         ),
         "categories": {
             "Investment Basis": "all",
+            "Cash Flow": "all",           # projected waterfall from UW proforma
             "Valuation & Returns": "all",
-            # Going-in debt only — Original LTV, term/rate, etc. NOT DSCR/Debt Yield
-            # (those are current-performance metrics).
+            # Going-in debt only — Original LTV, term/rate, etc.
+            # NOT DSCR/Debt Yield (those are actual/current-state metrics).
             "Debt & Leverage": {
                 "include_names": [
                     "Original LTV",
@@ -56,14 +57,14 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     },
     "perf_vs_plan": {
         "description": (
-            "Compare actual operating performance to the plan (UW or BP). "
-            "Operating metrics, occupancy/income-durability subset, and "
-            "current debt health (not going-in deal structure)."
+            "Compare actual cash flow performance to plan (UW or BP). "
+            "Full cash flow waterfall, performance analysis metrics, "
+            "occupancy/income-durability subset, and current debt health."
         ),
         "categories": {
-            "Operating Performance": "all",
-            # Income-durability subset only. The full Leasing category (WALT,
-            # tenant concentration, lease type mix, etc.) is reserved for Lease Review.
+            "Cash Flow": "all",           # waterfall: PGI → Cash Available for Distribution
+            "Operating Performance": "all",  # analysis: NOI Margin, NOI Growth, etc.
+            # Income-durability subset. Full Leasing category reserved for Lease Review.
             "Leasing & Income Durability": {
                 "include_names": [
                     "Physical Occupancy",
@@ -75,8 +76,7 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
                     "Tenant Delinquency Rate",
                 ],
             },
-            # Current debt health only — NOT Original LTV / Interest Rate / Term
-            # (those are going-in deal structure for Deal Review).
+            # Current debt health — NOT going-in deal structure (that's Deal Review).
             "Debt & Leverage": {
                 "include_names": [
                     "Current LTV",

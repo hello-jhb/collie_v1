@@ -21,9 +21,11 @@ from typing import Any
 
 import ssot
 from metric_catalog import load_metric_catalog
+import calculations
 from flexible_extractor import (
     scan_workbook_for_all_metrics,
     classify_file_layer,
+    filter_catalog_for_layer,
 )
 
 
@@ -60,39 +62,48 @@ def classify_file(filename: str) -> dict[str, Any]:
     }
 
 
-def extract_from_file(filename: str) -> dict[str, Any]:
+def extract_from_file(filename: str, layer: str | None = None) -> dict[str, Any]:
     """
-    Extract all metrics from a single Excel file using the metric catalog.
-    Returns a list of metric dicts (each with name, value, sheet, cell).
+    Extract metrics from a single Excel file using the metric catalog.
+
+    If `layer` is provided, only scans metrics relevant to that SSOT layer:
+      - skips calculated metrics (derived later, not extracted from cells)
+      - skips metrics whose data_nature doesn't match the layer's expected type
+        (e.g. won't scan for Current LTV in an underwriting file)
     """
     file_path = UPLOAD_DIR / filename
     if not file_path.exists():
         return {"error": f"File not found in uploads/: {filename}"}
 
     if file_path.suffix.lower() not in {".xlsx", ".xlsm"}:
-        return {
-            "error": f"Only Excel files supported in v2. Got: {file_path.suffix}",
-        }
+        return {"error": f"Only Excel files supported in v2. Got: {file_path.suffix}"}
 
-    catalog = load_metric_catalog()
-    matches_by_id = scan_workbook_for_all_metrics(file_path, catalog)
+    full_catalog = load_metric_catalog()
+    scan_catalog = (
+        filter_catalog_for_layer(full_catalog, layer) if layer
+        else [m for m in full_catalog if m.get("metric_source", "extracted") == "extracted"]
+    )
+
+    matches_by_id = scan_workbook_for_all_metrics(file_path, scan_catalog)
 
     extracted = []
     for match in matches_by_id.values():
         if match:
             extracted.append({
                 "metric_name": match["metric_name"],
-                "value": match["value"],
-                "sheet": match["sheet"],
-                "value_cell": match["value_cell"],
-                "confidence": match["confidence"],
+                "value":       match["value"],
+                "sheet":       match["sheet"],
+                "value_cell":  match["value_cell"],
+                "confidence":  match["confidence"],
             })
 
     return {
-        "filename": filename,
-        "metrics": extracted,
+        "filename":        filename,
+        "metrics":         extracted,
         "extracted_count": len(extracted),
-        "catalog_size": len(catalog),
+        "catalog_size":    len(full_catalog),
+        "scanned_count":   len(scan_catalog),
+        "layer":           layer,
     }
 
 
@@ -130,7 +141,8 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     if layer not in ssot.KNOWN_LAYERS:
         return {"error": f"Unknown layer: {layer!r}. Valid: {sorted(ssot.KNOWN_LAYERS)}"}
 
-    extraction = extract_from_file(filename)
+    # Pass layer so extraction only scans relevant metrics for this file type
+    extraction = extract_from_file(filename, layer=layer)
     if "error" in extraction:
         return extraction
 
@@ -140,12 +152,17 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         source_file=filename,
     )
 
+    # Recompute derived metrics now that SSOT has new data
+    calc_result = calculations.calculate_derived_metrics()
+
     return {
-        "filename": filename,
-        "layer": layer,
-        "metric_count": extraction["extracted_count"],
-        "catalog_size": extraction["catalog_size"],
-        "layers_now_present": ssot.list_layers(),
+        "filename":          filename,
+        "layer":             layer,
+        "metric_count":      extraction["extracted_count"],
+        "scanned_count":     extraction.get("scanned_count", extraction["extracted_count"]),
+        "catalog_size":      extraction["catalog_size"],
+        "layers_now_present":ssot.list_layers(),
+        "calculated":        calc_result["computed"],
     }
 
 

@@ -99,17 +99,16 @@ def build_aliases(metric_name, aliases_text):
 
     lower = metric_name.lower()
 
-    if "noi" in lower or "net operating income" in lower:
+    # NOI — only the primary metric gets bare "NOI" alias.
+    # Sub-metrics (NOI Margin, NOI Growth, etc.) have specific aliases in the catalog.
+    # Giving them "NOI" would cause them to match the NOI cell and overwrite the real value.
+    if lower in ("net operating income (noi)", "net operating income"):
         aliases += ["NOI", "Net Operating Income"]
 
-    if "revenue" in lower or "income" in lower:
-        aliases += [
-            "Revenue",
-            "Total Revenue",
-            "Total Operating Revenue",
-            "Effective Gross Revenue",
-            "EGI"
-        ]
+    # Revenue aliases removed from programmatic expansion.
+    # EGI and PGI have carefully curated aliases in the catalog.
+    # Programmatic expansion was causing NOI, PGI, and other metrics to
+    # inherit EGI/Revenue aliases and match the wrong cells.
 
     if "expense" in lower or "opex" in lower:
         aliases += [
@@ -119,29 +118,36 @@ def build_aliases(metric_name, aliases_text):
             "Expenses"
         ]
 
-    if "dscr" in lower:
+    # DSCR — only the primary DSCR metric gets the bare "DSCR" alias.
+    # Refinance DSCR has its own specific aliases in the catalog.
+    if lower.startswith("dscr") or lower == "dscr / debt coverage ratio":
         aliases += ["DSCR", "Debt Service Coverage Ratio"]
 
-    if "irr" in lower:
-        aliases += ["IRR", "Internal Rate of Return"]
-
-    if "levered irr" in lower:
-        aliases += ["Levered IRR", "Equity IRR"]
+    # IRR — do NOT add bare "IRR" to either levered or unlevered; they'd share the first match.
+    # Do NOT add cross-aliases (Levered IRR should not list Unlevered IRR, and vice versa).
+    if "levered irr" in lower and "unlevered" not in lower:
+        aliases += ["Levered IRR", "Equity IRR", "IRR (Levered)"]
 
     if "unlevered irr" in lower:
-        aliases += ["Unlevered IRR", "Property IRR"]
+        aliases += ["Unlevered IRR", "Property IRR", "IRR (Unlevered)", "Unlevered Return"]
 
-    if "cap rate" in lower:
-        aliases += ["Cap Rate", "Capitalization Rate", "Going-in Cap Rate", "Exit Cap Rate"]
+    # Cap rate — do NOT add Going-in Cap Rate and Exit Cap Rate to each other.
+    # They are distinct metrics that should only match their own cells.
+    if "cap rate" in lower or "capitalization rate" in lower:
+        aliases += ["Cap Rate", "Capitalization Rate"]
 
     if "purchase price" in lower:
         aliases += ["Purchase Price", "Acquisition Price"]
 
-    if "basis" in lower:
+    # Basis — only the primary all-in basis metric gets generic "Basis" aliases.
+    # Per-SF basis, market replacement basis, etc. have specific aliases in catalog.
+    if "all-in basis" in lower or "all in basis" in lower or "total acquisition cost" in lower:
         aliases += ["Basis", "Total Basis", "Cost Basis"]
 
-    if "occupancy" in lower:
-        aliases += ["Occupancy", "Occupied", "Vacancy"]
+    # Occupancy — do NOT add generic "Occupancy" to all occupancy metrics.
+    # Physical, Economic, Leased, and Break-even Occupancy each have their
+    # own specific aliases in the catalog. A generic "Occupancy" alias on all
+    # of them would cause every occupancy cell to match the first one scanned.
 
     if "walt" in lower or "wale" in lower:
         aliases += ["WALT", "WALE", "Weighted Average Lease Term"]
@@ -149,10 +155,16 @@ def build_aliases(metric_name, aliases_text):
     if "ltv" in lower:
         aliases += ["LTV", "Loan to Value"]
 
-    if "debt" in lower or "loan" in lower:
-        aliases += ["Debt", "Loan", "Loan Amount", "Debt Balance"]
+    # NOTE: bare "Debt" and "Loan" intentionally removed.
+    # Any metric with "debt" or "loan" in its name (DSCR, Debt Yield, Loan Maturity, etc.)
+    # would inherit these, causing them to match any cell labeled "Acquisition Loan",
+    # "Senior Loan", etc. — wrong cell, wrong value.
+    # Specific debt aliases (Loan Balance, Debt Balance) are set in the catalog directly.
 
-    if "capex" in lower:
+    # CapEx — only the CapEx Budget (UW projection) gets generic "CapEx" alias.
+    # Capital Expenditures (cash flow line item), Spent to Date, Variance, and Remaining
+    # have their own specific aliases in the catalog so they don't share the same cell.
+    if "capex budget" in lower:
         aliases += ["CapEx", "Capital Expenditure", "Capital Costs"]
 
     # Deduplicate while preserving order

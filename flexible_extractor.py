@@ -137,35 +137,66 @@ def scan_workbook_for_all_metrics(file_path, catalog):
                     continue
 
                 for alias_text, metric, original_alias in alias_index:
-                    if alias_text in cell_text:
-                        value, value_cell, direction = find_nearby_value(
-                            ws, cell.row, cell.column
-                        )
-                        if value is None:
-                            continue
-                        confidence = "high" if direction in ("right", "below") else "medium"
-                        matches_by_metric[metric["metric_id"]].append({
-                            "metric_id": metric["metric_id"],
-                            "metric_name": metric["metric_name"],
-                            "category": metric["category"],
-                            "definition": metric["definition"],
-                            "value": value,
-                            "source_file": file_name,
-                            "sheet": sheet_name,
-                            "label_cell": cell.coordinate,
-                            "value_cell": value_cell,
-                            "matched_alias": original_alias,
-                            "confidence": confidence,
-                            "match_method": direction,
-                        })
+                    if alias_text not in cell_text:
+                        continue
 
-    # Best match per metric (high-confidence first).
+                    # Label quality: penalise matches where the alias is a small
+                    # fraction of the cell label (e.g. "noi" inside "noi to offset
+                    # interest"). An exact or near-exact label match scores 1.0;
+                    # a substring-in-long-label scores proportionally lower.
+                    label_ratio = len(alias_text) / max(len(cell_text), 1)
+                    # Also penalise if alias appears mid-word (e.g. "irr" in "irrespective")
+                    idx = cell_text.find(alias_text)
+                    char_before = cell_text[idx - 1] if idx > 0 else " "
+                    char_after  = cell_text[idx + len(alias_text)] if idx + len(alias_text) < len(cell_text) else " "
+                    mid_word = char_before.isalpha() or char_after.isalpha()
+                    if mid_word:
+                        continue  # alias embedded inside a longer word — skip
+
+                    value, value_cell, direction = find_nearby_value(
+                        ws, cell.row, cell.column
+                    )
+                    if value is None:
+                        continue
+
+                    # Confidence tiers:
+                    #   "exact"  — alias covers ≥80% of the cell label, value right/below
+                    #   "high"   — value right/below (alias may be partial label)
+                    #   "medium" — value found nearby
+                    #   "partial"— alias is a small fragment of a longer label (label_ratio < 0.4)
+                    if direction in ("right", "below"):
+                        confidence = "exact" if label_ratio >= 0.8 else "high"
+                    else:
+                        confidence = "partial" if label_ratio < 0.4 else "medium"
+
+                    matches_by_metric[metric["metric_id"]].append({
+                        "metric_id": metric["metric_id"],
+                        "metric_name": metric["metric_name"],
+                        "category": metric["category"],
+                        "definition": metric["definition"],
+                        "value": value,
+                        "source_file": file_name,
+                        "sheet": sheet_name,
+                        "label_cell": cell.coordinate,
+                        "value_cell": value_cell,
+                        "matched_alias": original_alias,
+                        "confidence": confidence,
+                        "label_ratio": round(label_ratio, 2),
+                        "match_method": direction,
+                    })
+
+    # Best match per metric — ranked by confidence tier then label quality.
+    # Tier order: exact > high > medium > partial
+    _TIER = {"exact": 0, "high": 1, "medium": 2, "partial": 3}
     best = {}
     for metric_id, matches in matches_by_metric.items():
         if not matches:
             best[metric_id] = None
         else:
-            matches.sort(key=lambda x: 0 if x["confidence"] == "high" else 1)
+            matches.sort(key=lambda x: (
+                _TIER.get(x["confidence"], 9),
+                -x.get("label_ratio", 0),  # higher label_ratio wins ties
+            ))
             best[metric_id] = matches[0]
     return best
 

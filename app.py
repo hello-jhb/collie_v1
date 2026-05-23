@@ -400,28 +400,60 @@ def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:
         _render_tool_trace(agent)
 
 
+_SCENARIO_DEFAULT_LAYER: dict[str, str] = {
+    # When a file can't be classified by name, fall back to the layer that
+    # makes most sense for the active scenario.
+    "deal_review":  "underwriting",
+    "perf_vs_plan": "actuals_recent",
+}
+
+
 def _ingest_new_files(new_files: list) -> None:
     """
-    Phase 1: ingest each newly-uploaded file. Files whose auto-classification
-    fails are stashed in st.session_state.pending_overrides for the user to
-    resolve via the override form.
+    Phase 1: ingest each newly-uploaded file.
+
+    Classification strategy (in order):
+      1. Auto-classify from filename (proforma, financial statement, etc.)
+      2. Scenario-aware fallback — if filename gives no signal, use the layer
+         that matches the active scenario (deal_review → underwriting, etc.)
+      3. Only ask the user to manually classify if the scenario itself is unclear.
+
+    Files that still can't be resolved are stashed in pending_overrides.
     """
     pseudo_user_msg = "Uploaded: " + ", ".join(sorted(f.name for f in new_files))
     with st.chat_message("user"):
         st.markdown(pseudo_user_msg)
 
     failed_to_classify: dict[str, str] = {}
+    scenario_key = st.session_state.active_scenario
+    scenario_fallback = _SCENARIO_DEFAULT_LAYER.get(scenario_key)
 
     with st.chat_message("assistant"):
         with st.status("Ingesting files...", expanded=True) as status:
             for uf in new_files:
                 status.update(label=f"Ingesting {uf.name}...")
                 result = tools.ingest_to_ssot(uf.name)
-                if result.get("needs_manual_classification"):
+
+                if result.get("needs_manual_classification") and scenario_fallback:
+                    # Filename gave no signal — use the scenario context as the layer.
+                    result = tools.ingest_to_ssot_with_layer(uf.name, scenario_fallback)
+                    if "error" not in result:
+                        st.markdown(
+                            f"✅ **{uf.name}** → `{scenario_fallback}` "
+                            f"(auto-assigned from scenario — "
+                            f"{result['metric_count']} metrics extracted)"
+                        )
+                    else:
+                        failed_to_classify[uf.name] = result.get("error", "")
+                        st.markdown(f"❌ **{uf.name}** — {result['error']}")
+
+                elif result.get("needs_manual_classification"):
                     failed_to_classify[uf.name] = result.get("error", "")
                     st.markdown(f"⚠️ **{uf.name}** — needs manual classification")
+
                 elif "error" in result:
                     st.markdown(f"❌ **{uf.name}** — {result['error']}")
+
                 else:
                     st.markdown(
                         f"✅ **{uf.name}** → `{result['layer']}` "

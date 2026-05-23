@@ -67,8 +67,11 @@ def find_nearby_value(ws, row, col):
 
 # Which data_nature values are relevant per SSOT layer.
 # "mixed" metrics are always included (meaningful in both projection and actual contexts).
+# "underwriting" scans all three because acquisition/closing models routinely contain both
+# projected values (IRR, NOI proforma, exit cap) and actual values (closing costs paid,
+# loan amount drawn, actual purchase price confirmed at closing).
 _LAYER_DATA_NATURE: dict[str, set] = {
-    "underwriting":    {"projection", "mixed"},
+    "underwriting":    {"projection", "actual", "mixed"},
     "business_plan":   {"projection", "actual", "mixed"},
     "actuals_2020":    {"actual", "mixed"},
     "actuals_2021":    {"actual", "mixed"},

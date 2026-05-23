@@ -302,11 +302,14 @@ def classify_file_layer(file_name):
                 return f"actuals_{year}"
         return "actuals_recent"
 
-    # --- Acquisition Underwriting (proforma / UW model / deal memo) ---
+    # --- Acquisition Underwriting (proforma / UW model / deal memo / closing docs) ---
     uw_keywords = [
         "acquisition", "underwriting",
         "proforma", "pro forma", "pro-forma",
         "uw model", "deal memo",
+        "closing", "settlement",  # closing statement / settlement statement
+        "psa", "purchase agreement",        # purchase & sale agreement
+        "ic memo", "investment committee",  # IC package
     ]
     # Word-boundary check for the short token " uw" (avoid matching "answer"!)
     uw_token_match = (

@@ -136,10 +136,11 @@ for key, default in [
 
 
 # Layer options the user can pick from the manual-override dropdown.
-# Ordered to put the most common choices first.
+# Must match ssot.KNOWN_LAYERS exactly. Ordered: most common choices first.
 _MANUAL_LAYER_OPTIONS = [
-    "acquisition_underwriting",
+    "underwriting",
     "business_plan",
+    "actuals_recent",
     "actuals_2020",
     "actuals_2021",
     "actuals_2022",
@@ -493,9 +494,9 @@ def _render_manual_override_ui() -> None:
 
     # Suggest a sensible default based on the active scenario.
     default_layer = {
-        "deal_review": "acquisition_underwriting",
-        "perf_vs_plan": "actuals_2022",
-    }.get(scenario_key, "acquisition_underwriting")
+        "deal_review": "underwriting",
+        "perf_vs_plan": "actuals_recent",
+    }.get(scenario_key, "underwriting")
 
     with st.form(key="manual_override_form"):
         choices: dict[str, str] = {}

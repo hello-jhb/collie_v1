@@ -41,9 +41,14 @@ HARD RULES:
    - Core-Plus:  mostly stabilized, minor lease-up, 6-7% cap
    - Value-Add:  significant vacancy, renovation, lease-up required, 7%+ cap or below-market rents
    - Opportunistic: distressed, development, major repositioning, high execution risk
-5. Risk/Mitigant: write exactly 2 bullets unless the user explicitly asks for more.
-6. Format all dollar values as $X,XXX,XXX. Format percentages as X.X%. Format multiples as X.Xx.
-7. If the same metric appears in multiple categories, use the most specific value.
+5. Investment Position MUST be inferred from equity structure data:
+   - GP / Sponsor: model shows GP promote, carried interest, or sponsor co-invest alongside LP equity
+   - LP: model shows only LP equity contribution with a preferred return threshold and no promote structure
+   - Co-GP: two GP parties with separate promote tiers
+   - Unknown: write "—" if equity structure is absent from the data
+6. Risk/Mitigant: write exactly 2 bullets unless the user explicitly asks for more.
+7. Format all dollar values as $X,XXX,XXX. Format percentages as X.X%. Format multiples as X.Xx.
+8. If the same metric appears in multiple categories, use the most specific value.
 """
 
 
@@ -95,8 +100,21 @@ OUTPUT THIS TEMPLATE EXACTLY:
 | Underwritten DSCR | [X.Xx] |
 | Underwritten Debt Yield | [X.X%] |
 | Break-even Occupancy | [X.X%] |
-| Equity Invested | $[amount] |
-| LP / GP Split | [XX% LP / XX% GP — or "—" if not in model] |
+| Total Equity | $[amount] |
+
+---
+
+### Equity Structure
+| | |
+|---|---|
+| Investment Position | [GP / LP / Co-GP — infer from waterfall structure if not explicit] |
+| LP Equity | $[amount] |
+| GP / Sponsor Equity | $[amount] |
+| LP / GP Split | [XX% LP / XX% GP] |
+| LP Preferred Return | [X.X% — or "—" if not in model] |
+| GP Promote / Carried Interest | [X% above pref — or "—" if not in model] |
+
+> **Position note:** Infer Investment Position from the data — if the model shows a GP promote structure and sponsor co-invest, the filing party is the **GP/Sponsor**. If the model shows LP contribution only with a preferred return threshold, this is an **LP perspective**. If both are modeled, state both.
 
 ---
 
@@ -120,13 +138,14 @@ OUTPUT THIS TEMPLATE EXACTLY:
 
 ---
 
-### Return Profile (Deal Level)
-| | |
-|---|---|
-| Levered IRR | [X.X%] |
-| Unlevered IRR | [X.X%] |
-| Equity Multiple | [X.Xx] |
-| Cash-on-Cash (Year 1) | [X.X%] |
+### Return Profile
+| | | |
+|---|---|---|
+| | **Deal Level** | **LP Level** |
+| IRR | [Levered IRR X.X%] | [LP IRR if modeled, else "—"] |
+| Unlevered IRR | [X.X%] | — |
+| Equity Multiple | [X.Xx] | [LP EM if modeled, else "—"] |
+| Cash-on-Cash (Year 1) | [X.X%] | — |
 
 ---
 

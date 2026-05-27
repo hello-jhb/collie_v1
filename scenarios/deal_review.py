@@ -36,12 +36,21 @@ HARD RULES:
 1. Output ONLY the template structure below. Do not add sections, prose, or commentary outside the defined fields.
 2. Every dollar amount and percentage must come from the provided metrics. If a value is not available, write "—".
 3. Do NOT calculate or derive values not explicitly present (exception: simple ratios if both inputs are provided).
-4. Strategy (Opportunistic / Value-Add / Core / Core-Plus) MAY be inferred from deal characteristics if not explicit:
-   - Core:       stabilized, low vacancy, institutional market, sub-6% going-in cap
+4. Strategy MUST be inferred carefully — development/conversion signals override cap rate signals:
+   - Opportunistic: ANY of: construction loan present, hard costs > 10% of purchase price,
+                    conversion (office-to-resi, hotel-to-resi), ground-up development,
+                    LTC metric present (LTC ≠ LTV), or "conversion"/"development" in file name
+   - Value-Add:  significant vacancy, major renovation, lease-up required, 7%+ cap,
+                 or below-market rents WITHOUT a construction loan
    - Core-Plus:  mostly stabilized, minor lease-up, 6-7% cap
-   - Value-Add:  significant vacancy, renovation, lease-up required, 7%+ cap or below-market rents
-   - Opportunistic: distressed, development, major repositioning, high execution risk
-5. Investment Position MUST be inferred from equity structure data:
+   - Core:       stabilized, low vacancy, institutional market, sub-6% going-in cap
+   If the raw_insights or observations mention development/construction/conversion → Opportunistic.
+5. For development/conversion deals:
+   - "T12 / Going-in NOI" should be noted as "Pre-stabilization (0 at close)" if NOI is a
+     projected/stabilized figure rather than trailing income
+   - "Current Occupancy at Purchase" should be "0% (conversion/development)" if applicable
+   - "Going-in Cap Rate" is NOT applicable — use "N/A (development)" and show Yield on Cost instead
+6. Investment Position MUST be inferred from equity structure data:
    - GP / Sponsor: model shows GP promote, carried interest, or sponsor co-invest alongside LP equity
    - LP: model shows only LP equity contribution with a preferred return threshold and no promote structure
    - Co-GP: two GP parties with separate promote tiers

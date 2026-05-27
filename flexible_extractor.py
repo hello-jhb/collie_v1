@@ -30,18 +30,37 @@ def cell_address(row, col):
 
 def find_nearby_value(ws, row, col):
     """
-    Search nearby cells for a value.
+    Search nearby cells for a non-zero numeric value.
     Priority:
-    1. Same row, cells to the right
+    1. Same row, cells to the right — prefer first NON-ZERO value
+       (handles multi-column tables where the first column is "At Close = 0"
+        and the meaningful value is in a "Total" column further right)
     2. Same column, cells below
     3. Small surrounding area
+
+    Zero-skipping logic (right-scan only):
+    Scan all 5 cells to the right first. If any are non-zero, return the
+    first non-zero one. If all are zero, return the first zero found.
+    This prevents multi-column tables (Sources/Uses with At-Close=0,
+    Post-Close=X, Total=X) from returning 0 when the real value is to
+    the right.
     """
 
-    # Look right
-    for offset in range(1, 6):
-        value = ws.cell(row=row, column=col + offset).value
-        if is_numeric(value):
-            return value, cell_address(row, col + offset), "right"
+    # Look right — collect all values first, then pick best
+    right_values = []
+    for offset in range(1, 8):  # scan up to 7 cols to handle wide tables
+        cell = ws.cell(row=row, column=col + offset)
+        if is_numeric(cell.value):
+            right_values.append((cell.value, cell_address(row, col + offset)))
+        elif cell.value is not None and str(cell.value).strip():
+            # Hit a text cell — stop scanning right (end of table row)
+            break
+
+    if right_values:
+        # Prefer first non-zero; fall back to first zero if all are zero
+        non_zero = [(v, addr) for v, addr in right_values if v != 0]
+        best_val, best_addr = (non_zero[0] if non_zero else right_values[0])
+        return best_val, best_addr, "right"
 
     # Look below
     for offset in range(1, 6):
@@ -131,7 +150,26 @@ def scan_workbook_for_all_metrics(file_path, catalog):
     matches_by_metric: dict = {m["metric_id"]: [] for m in catalog}
     file_name = Path(file_path).name
 
-    for sheet_name in wb.sheetnames:
+    # Scan high-signal sheets first so their matches win ties.
+    # Annual summary/assumption sheets contain the definitive values;
+    # monthly detail tabs often have the same labels with partial/zero values.
+    _PRIORITY_SHEET_KEYWORDS = [
+        "summary", "assumption", "sources", "uses", "return",
+        "waterfall", "annual", "overview", "irr", "exit",
+        "proforma", "pro forma", "debt", "equity",
+    ]
+
+    def _sheet_priority(name: str) -> int:
+        nl = name.lower()
+        if any(kw in nl for kw in _PRIORITY_SHEET_KEYWORDS):
+            return 0
+        if "monthly" in nl or "month" in nl:
+            return 2   # monthly detail — scan last
+        return 1
+
+    sorted_sheet_names = sorted(wb.sheetnames, key=_sheet_priority)
+
+    for sheet_name in sorted_sheet_names:
         ws = wb[sheet_name]
         for row in ws.iter_rows():
             for cell in row:

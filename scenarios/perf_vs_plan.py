@@ -190,8 +190,23 @@ def generate_perf_vs_plan() -> dict[str, Any]:
     from datetime import datetime
     generated_at = datetime.utcnow().strftime("%Y-%m-%d")
 
+    # Collect raw_insights from all layers so GPT can fill structural gaps
+    # (e.g. inferred occupancy drivers, lease-up pace, debt covenant context).
+    all_insights = {}
+    for name, layer_data in {**plan_data, **actuals_data}.items():
+        ri = layer_data.get("raw_insights")
+        if ri:
+            all_insights[name] = ri
+
+    insights_block = (
+        "\n\nRAW INSIGHT PASSES (GPT-inferred from full workbook scans — "
+        "use to fill gaps the structured metrics above don't cover):\n"
+        + json.dumps(all_insights, indent=2, default=str)
+        if all_insights else ""
+    )
+
     user_prompt = TEMPLATE.format(
-        plan_layers_json=json.dumps(plan_filtered, indent=2, default=str),
+        plan_layers_json=json.dumps(plan_filtered, indent=2, default=str) + insights_block,
         actuals_layers_json=json.dumps(actuals_filtered, indent=2, default=str),
         period_label=_period_label(actuals_layers),
         source_files=", ".join(source_files) if source_files else "Unknown",

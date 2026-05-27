@@ -274,6 +274,78 @@ def scan_workbook_for_metric(file_path, metric):
     return matches[0]
 
 
+def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
+    """
+    Extract ALL (sheet, label, value) pairs from a workbook without any
+    catalog filtering. This gives the raw structure of the model to GPT
+    so it can reason about things the metric catalog hasn't seen.
+
+    Returns a list of dicts:
+        {"sheet": str, "label": str, "value": numeric, "cell": str}
+
+    Capped at max_pairs to stay within a sensible token budget (~6k tokens).
+    Priority: sheets whose names suggest they contain summary/key data come first.
+    """
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception:
+        return []
+
+    # Prioritise summary/assumption sheets so if we hit the cap we keep the
+    # most analytically relevant rows.
+    priority_keywords = [
+        "summary", "assumption", "return", "waterfall", "overview",
+        "sources", "uses", "debt", "equity", "cashflow", "cash flow",
+        "proforma", "pro forma", "irr", "exit",
+    ]
+
+    def sheet_priority(name: str) -> int:
+        nl = name.lower()
+        return 0 if any(kw in nl for kw in priority_keywords) else 1
+
+    sorted_sheets = sorted(wb.sheetnames, key=sheet_priority)
+
+    pairs = []
+    seen_labels: set[str] = set()
+
+    for sheet_name in sorted_sheets:
+        if len(pairs) >= max_pairs:
+            break
+        ws = wb[sheet_name]
+        for row in ws.iter_rows():
+            if len(pairs) >= max_pairs:
+                break
+            for cell in row:
+                cell_text = clean_text(cell.value)
+                if not cell_text or len(cell_text) < 3:
+                    continue
+                # Only process text cells (labels)
+                if not isinstance(cell.value, str):
+                    continue
+
+                value, value_cell, direction = find_nearby_value(
+                    ws, cell.row, cell.column
+                )
+                if value is None:
+                    continue
+
+                # Deduplicate by (sheet, normalised label) to avoid
+                # repeated header rows skewing GPT's reading.
+                key = f"{sheet_name}|{normalize_text(cell_text)}"
+                if key in seen_labels:
+                    continue
+                seen_labels.add(key)
+
+                pairs.append({
+                    "sheet": sheet_name,
+                    "label": cell_text,
+                    "value": value,
+                    "cell": value_cell,
+                })
+
+    return pairs
+
+
 def classify_file_layer(file_name):
     """
     Classify a file by its investment lifecycle layer based on its name.

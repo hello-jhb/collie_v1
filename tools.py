@@ -24,9 +24,11 @@ from metric_catalog import load_metric_catalog
 import calculations
 from flexible_extractor import (
     scan_workbook_for_all_metrics,
+    extract_raw_labeled_pairs,
     classify_file_layer,
     filter_catalog_for_layer,
 )
+from scenarios._llm import run_raw_insight_pass, llm_available
 
 
 UPLOAD_DIR = Path("uploads")
@@ -134,35 +136,53 @@ def ingest_to_ssot(filename: str) -> dict[str, Any]:
 
 def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     """
-    Manual-override variant: skip classification, write to the user-specified
-    layer. Used when the auto-classifier returns 'unknown' and the user picks
-    the right layer from a dropdown.
+    Classify + extract + GPT insight pass + write to SSOT.
+
+    Two-pass ingest:
+      Pass 1 (deterministic): metric catalog extraction → structured SSOT metrics
+      Pass 2 (GPT):           raw labeled-pair read → inferred characteristics,
+                              gap-filled metrics, key observations
+
+    Pass 2 runs at ingest time so every downstream scenario benefits automatically.
+    It uses gpt-4o-mini to stay cheap (~$0.01–0.02 per file).
+    If no API key is set, Pass 2 is silently skipped.
     """
     if layer not in ssot.KNOWN_LAYERS:
         return {"error": f"Unknown layer: {layer!r}. Valid: {sorted(ssot.KNOWN_LAYERS)}"}
 
-    # Pass layer so extraction only scans relevant metrics for this file type
+    file_path = UPLOAD_DIR / filename
+
+    # --- Pass 1: deterministic metric extraction ---
     extraction = extract_from_file(filename, layer=layer)
     if "error" in extraction:
         return extraction
 
+    # --- Pass 2: GPT raw insight pass ---
+    raw_insights: dict[str, Any] | None = None
+    if llm_available():
+        labeled_pairs = extract_raw_labeled_pairs(file_path)
+        raw_insights = run_raw_insight_pass(labeled_pairs, layer, filename)
+
+    # Write both passes to SSOT
     ssot.write_layer(
         layer=layer,
         metrics=extraction["metrics"],
         source_file=filename,
+        raw_insights=raw_insights,
     )
 
     # Recompute derived metrics now that SSOT has new data
     calc_result = calculations.calculate_derived_metrics()
 
     return {
-        "filename":          filename,
-        "layer":             layer,
-        "metric_count":      extraction["extracted_count"],
-        "scanned_count":     extraction.get("scanned_count", extraction["extracted_count"]),
-        "catalog_size":      extraction["catalog_size"],
-        "layers_now_present":ssot.list_layers(),
-        "calculated":        calc_result["computed"],
+        "filename":           filename,
+        "layer":              layer,
+        "metric_count":       extraction["extracted_count"],
+        "scanned_count":      extraction.get("scanned_count", extraction["extracted_count"]),
+        "catalog_size":       extraction["catalog_size"],
+        "layers_now_present": ssot.list_layers(),
+        "calculated":         calc_result["computed"],
+        "insight_pass":       "completed" if raw_insights else "skipped (no API key)",
     }
 
 

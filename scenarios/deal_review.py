@@ -191,8 +191,18 @@ def generate_deal_review() -> dict[str, Any]:
         if data.get("value") is not None
     }
 
+    # Include raw GPT insights (inferred characteristics, gap-filled metrics)
+    # if the insight pass ran at ingest time.
+    raw_insights = underwriting.get("raw_insights") or {}
+    insights_block = (
+        "\n\nRAW INSIGHT PASS (GPT-inferred from full workbook scan — "
+        "use to fill gaps the structured metrics above don't cover):\n"
+        + json.dumps(raw_insights, indent=2, default=str)
+        if raw_insights else ""
+    )
+
     user_prompt = TEMPLATE.format(
-        metrics_json=json.dumps(metrics_flat, indent=2, default=str),
+        metrics_json=json.dumps(metrics_flat, indent=2, default=str) + insights_block,
         source_file=underwriting.get("source_file", "Unknown"),
         ingested_at=underwriting.get("ingested_at", "Unknown"),
     )

@@ -108,6 +108,7 @@ def write_layer(
     metrics: list[dict[str, Any]],
     source_file: str,
     ssot: dict[str, Any] | None = None,
+    raw_insights: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Write a layer's worth of metrics into the SSOT.
@@ -143,6 +144,11 @@ def write_layer(
             }
             for m in metrics
         },
+        # Raw GPT insight pass — populated at ingest time when LLM is available.
+        # Contains inferred characteristics (GP/LP position, strategy, property type)
+        # and gap-filled metrics the structured extractor didn't find.
+        # None if the insight pass was skipped (no API key, or file unavailable).
+        "raw_insights": raw_insights or None,
     }
 
     # Provenance log — one entry per field write.

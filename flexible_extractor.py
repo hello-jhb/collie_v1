@@ -28,39 +28,147 @@ def cell_address(row, col):
     return openpyxl.utils.get_column_letter(col) + str(row)
 
 
-def find_nearby_value(ws, row, col):
-    """
-    Search nearby cells for a non-zero numeric value.
-    Priority:
-    1. Same row, cells to the right — prefer first NON-ZERO value
-       (handles multi-column tables where the first column is "At Close = 0"
-        and the meaningful value is in a "Total" column further right)
-    2. Same column, cells below
-    3. Small surrounding area
+# Column-header keywords used by table-aware extraction. Order = preference.
+# When the header row of a table contains one of these keywords, the matching
+# column is preferred over generic "first value to the right".
+_TOTAL_COLUMN_KEYWORDS    = ["total", "total cost", "all-in", "aggregate", "lifetime", "cumulative"]
+_PERIOD_COLUMN_KEYWORDS   = ["at close", "closing", "initial", "year 1", "y1", "yr 1",
+                             "post close", "post-close", "stabilized", "stable", "exit", "year 5", "yr 5"]
+_PER_UNIT_COLUMN_KEYWORDS = ["$/unit", "$/sf", "$/gsf", "$/nsf", "per unit", "per sf", "% total", "% of total"]
 
-    Zero-skipping logic (right-scan only):
-    Scan all 5 cells to the right first. If any are non-zero, return the
-    first non-zero one. If all are zero, return the first zero found.
-    This prevents multi-column tables (Sources/Uses with At-Close=0,
-    Post-Close=X, Total=X) from returning 0 when the real value is to
-    the right.
-    """
 
-    # Look right — collect all values first, then pick best
-    right_values = []
-    for offset in range(1, 8):  # scan up to 7 cols to handle wide tables
-        cell = ws.cell(row=row, column=col + offset)
+def _scan_data_columns(ws, label_row, label_col, max_scan=10):
+    """Return list of column indices to the right of label_col that contain numeric values."""
+    data_cols = []
+    for offset in range(1, max_scan + 1):
+        cell = ws.cell(row=label_row, column=label_col + offset)
         if is_numeric(cell.value):
-            right_values.append((cell.value, cell_address(row, col + offset)))
+            data_cols.append(label_col + offset)
         elif cell.value is not None and str(cell.value).strip():
-            # Hit a text cell — stop scanning right (end of table row)
+            # Hit a text cell — table row ends here
             break
+    return data_cols
 
-    if right_values:
-        # Prefer first non-zero; fall back to first zero if all are zero
-        non_zero = [(v, addr) for v, addr in right_values if v != 0]
+
+def _detect_column_headers(ws, label_row, data_cols, max_lookback=10):
+    """
+    Look up from the labeled row to find the nearest header row.
+
+    A row qualifies as a header if:
+      - At least half of the data_cols have non-numeric text values in that row
+      - Headers are typical column descriptors (years, periods, "Total", etc.)
+
+    Returns {col_idx: header_text}.
+    """
+    if not data_cols:
+        return {}
+
+    for r_offset in range(1, max_lookback + 1):
+        header_row = label_row - r_offset
+        if header_row < 1:
+            break
+        headers = {}
+        for col in data_cols:
+            val = ws.cell(row=header_row, column=col).value
+            if isinstance(val, str) and val.strip() and not is_numeric(val):
+                headers[col] = val.strip()
+        # Accept this as a header row if most data cols are text-headed
+        if len(headers) >= max(2, len(data_cols) // 2):
+            return headers
+    return {}
+
+
+def _pick_column_for_metric(headers: dict, metric_name_lower: str) -> int | None:
+    """
+    Given a {col: header_text} map and a metric name, pick the best column.
+
+    Logic (in order):
+      1. If metric name mentions a specific period (e.g. "Year 1", "At Close",
+         "Stabilized"), use the column whose header matches that period.
+      2. If metric name implies a total ("Total X", "All-in", "Project Cost"),
+         use the column whose header matches Total-like keywords.
+      3. Skip per-unit / per-SF / % columns (those are derived metrics, not the value).
+      4. Otherwise return None — caller falls back to "first value" behavior.
+    """
+    headers_lower = {col: h.lower() for col, h in headers.items()}
+
+    # (1) Period-specific preference based on metric name
+    period_map = [
+        (["at close", "closing", "initial", "going-in", "going in", "purchase"],
+            ["at close", "closing", "initial", "going-in", "going in"]),
+        (["post close", "post-close", "draws", "construction"],
+            ["post close", "post-close", "draws", "construction"]),
+        (["stabilized", "stabilization", "stable"],
+            ["stabilized", "stable", "stab"]),
+        (["year 1", "y1", "yr 1", "first year"],
+            ["year 1", "y1", "yr 1"]),
+        (["exit", "year 5", "yr 5", "terminal", "disposition"],
+            ["exit", "year 5", "yr 5", "terminal"]),
+    ]
+    for metric_keywords, header_keywords in period_map:
+        if any(mk in metric_name_lower for mk in metric_keywords):
+            for col, h in headers_lower.items():
+                if any(hk in h for hk in header_keywords):
+                    return col
+
+    # (2) Total-like preference (default for cost/proceeds/sources/uses items)
+    # If ANY column header is "Total" or similar, prefer it.
+    for col, h in headers_lower.items():
+        if any(kw == h or kw in h for kw in _TOTAL_COLUMN_KEYWORDS):
+            # But skip if it's actually a per-unit column ("$/Total" doesn't exist
+            # but be safe)
+            if not any(pu in h for pu in _PER_UNIT_COLUMN_KEYWORDS):
+                return col
+
+    return None
+
+
+def find_nearby_value(ws, row, col, metric_name: str = ""):
+    """
+    Find the value associated with a labeled cell.
+
+    Strategy:
+      1. Scan data columns to the right
+      2. If multiple columns exist, look UP for a header row
+      3. If headers found, pick the column best matching the metric's semantics
+         (Total column for total metrics, period-specific for period metrics)
+      4. Otherwise fall back to first non-zero value
+      5. If no values right, look below
+      6. Last resort: nearby grid scan
+    """
+
+    data_cols = _scan_data_columns(ws, row, col)
+
+    # Table-aware path: 2+ columns of data → likely a table
+    if len(data_cols) >= 2:
+        headers = _detect_column_headers(ws, row, data_cols)
+        if headers and metric_name:
+            preferred_col = _pick_column_for_metric(headers, metric_name.lower())
+            if preferred_col is not None:
+                value = ws.cell(row=row, column=preferred_col).value
+                if is_numeric(value):
+                    return value, cell_address(row, preferred_col), "table-column"
+
+        # Skip per-unit/percentage columns when picking fallback
+        non_derived_cols = [
+            c for c in data_cols
+            if not (headers and any(
+                pu in headers.get(c, "").lower() for pu in _PER_UNIT_COLUMN_KEYWORDS
+            ))
+        ] or data_cols
+
+        right_values = [
+            (ws.cell(row=row, column=c).value, cell_address(row, c))
+            for c in non_derived_cols
+        ]
+        non_zero = [(v, a) for v, a in right_values if v != 0]
         best_val, best_addr = (non_zero[0] if non_zero else right_values[0])
         return best_val, best_addr, "right"
+
+    # Single value to the right (no table) — return it
+    if len(data_cols) == 1:
+        c = data_cols[0]
+        return ws.cell(row=row, column=c).value, cell_address(row, c), "right"
 
     # Look below
     for offset in range(1, 6):
@@ -68,15 +176,13 @@ def find_nearby_value(ws, row, col):
         if is_numeric(value):
             return value, cell_address(row + offset, col), "below"
 
-    # Look nearby grid
+    # Last resort: nearby grid scan
     for r_offset in range(-2, 4):
         for c_offset in range(-2, 6):
             r = row + r_offset
             c = col + c_offset
-
             if r < 1 or c < 1:
                 continue
-
             value = ws.cell(row=r, column=c).value
             if is_numeric(value):
                 return value, cell_address(r, c), "nearby"
@@ -195,7 +301,8 @@ def scan_workbook_for_all_metrics(file_path, catalog):
                         continue  # alias embedded inside a longer word — skip
 
                     value, value_cell, direction = find_nearby_value(
-                        ws, cell.row, cell.column
+                        ws, cell.row, cell.column,
+                        metric_name=metric["metric_name"],
                     )
                     if value is None:
                         continue
@@ -279,7 +386,8 @@ def scan_workbook_for_metric(file_path, metric):
                         value, value_cell, direction = find_nearby_value(
                             ws,
                             cell.row,
-                            cell.column
+                            cell.column,
+                            metric_name=metric["metric_name"],
                         )
 
                         if value is not None:

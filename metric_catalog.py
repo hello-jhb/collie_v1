@@ -123,18 +123,22 @@ def build_aliases(metric_name, aliases_text):
     if lower.startswith("dscr") or lower == "dscr / debt coverage ratio":
         aliases += ["DSCR", "Debt Service Coverage Ratio"]
 
-    # IRR — do NOT add bare "IRR" to either levered or unlevered; they'd share the first match.
-    # Do NOT add cross-aliases (Levered IRR should not list Unlevered IRR, and vice versa).
+    # IRR — bare "IRR" goes on Levered only (most models label the equity return as "IRR").
+    # Unlevered gets its own specific aliases. No cross-aliases between the two.
     if "levered irr" in lower and "unlevered" not in lower:
-        aliases += ["Levered IRR", "Equity IRR", "IRR (Levered)"]
+        aliases += ["Levered IRR", "IRR", "Equity IRR", "IRR (Levered)", "Project IRR"]
 
     if "unlevered irr" in lower:
         aliases += ["Unlevered IRR", "Property IRR", "IRR (Unlevered)", "Unlevered Return"]
 
-    # Cap rate — do NOT add Going-in Cap Rate and Exit Cap Rate to each other.
-    # They are distinct metrics that should only match their own cells.
-    if "cap rate" in lower or "capitalization rate" in lower:
-        aliases += ["Cap Rate", "Capitalization Rate"]
+    # Cap rate — going-in and exit are distinct; each only matches its own label.
+    # Generic "Cap Rate" goes on Going-in Cap Rate since that's what "cap rate" means
+    # at acquisition time. Exit cap rate has its own specific aliases in the catalog.
+    if "going-in cap rate" in lower or "going in cap rate" in lower:
+        aliases += ["Going-in Cap Rate", "Going-In Cap", "Purchase Cap Rate", "Acquisition Cap Rate"]
+
+    if "exit cap rate" in lower:
+        aliases += ["Exit Cap Rate", "Exit Cap", "Terminal Cap Rate", "Reversion Cap Rate", "Disposition Cap Rate"]
 
     if "purchase price" in lower:
         aliases += ["Purchase Price", "Acquisition Price"]

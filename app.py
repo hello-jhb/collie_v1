@@ -193,6 +193,19 @@ def _ssot_panel() -> None:
         st.caption("No files ingested yet.")
         return
 
+    # Show last ingested timestamp — makes stale SSOT data immediately visible
+    last_update = summary.get("updated_at")
+    if last_update:
+        from datetime import datetime, timezone
+        try:
+            ts = datetime.fromisoformat(last_update)
+            age = datetime.now(timezone.utc) - ts
+            hours = int(age.total_seconds() // 3600)
+            age_str = f"{hours}h ago" if hours < 48 else f"{age.days}d ago"
+            st.caption(f"Last ingested: {age_str}")
+        except Exception:
+            st.caption(f"Last ingested: {last_update[:10]}")
+
     st.markdown("**Layers in SSOT:**")
     if layers:
         st.markdown(

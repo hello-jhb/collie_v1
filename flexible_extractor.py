@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 import pandas as pd
 import openpyxl
 
@@ -496,6 +497,144 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
                 })
 
     return pairs
+
+
+def extract_time_series_rows(file_path, max_rows_per_sheet: int = 25, max_total_rows: int = 80) -> list[dict]:
+    """
+    Find rows in the workbook that look like multi-year time series.
+
+    A row qualifies as a time series if:
+      - It has a text label in the leftmost data column
+      - 3+ numeric cells follow in consecutive columns
+      - A row above has text headers that look like years (2020-2035) or
+        period labels (Y1, Yr 1, Year 1, Q1, Stabilized, Exit, etc.)
+
+    Returns list of:
+      {
+        "sheet": str,
+        "label": str,             # row label (e.g. "Net Operating Income")
+        "label_cell": str,        # cell ref of label
+        "headers": [str],         # column headers (years/periods)
+        "values": [number],       # aligned with headers
+      }
+
+    Cap at max_rows to avoid huge payloads. Prioritises sheets named like
+    cash flow projections.
+    """
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception:
+        return []
+
+    # Prioritise cash flow / proforma sheets
+    cf_keywords = ["annual", "cash flow", "cashflow", "cf", "proforma", "pro forma",
+                   "operating", "monthly", "schedule"]
+
+    def sheet_priority(name: str) -> int:
+        nl = name.lower()
+        return 0 if any(kw in nl for kw in cf_keywords) else 1
+
+    sorted_sheets = sorted(wb.sheetnames, key=sheet_priority)
+
+    # Labels to skip — meta/structural rows that aren't analytically interesting
+    _NOISE_LABELS = {"year", "month", "period", "day", "date", "row", "n/a"}
+
+    series = []
+    series_per_sheet: dict[str, int] = {}
+    period_pattern_re = re.compile(
+        r"^(20\d{2}|y(ear)?\s*\d{1,2}|yr\s*\d{1,2}|q[1-4]|fy\d{2,4}|"
+        r"stabili[sz]ed|exit|going.?in|at.close|post.close|trended|untrended)",
+        re.IGNORECASE,
+    )
+
+    def looks_like_period_header(val) -> bool:
+        """Accepts strings matching the regex OR integers in year range (2000-2100)."""
+        if val is None:
+            return False
+        # Year stored as a number
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return 2000 <= val <= 2100
+        s = str(val).strip()
+        if not s:
+            return False
+        return bool(period_pattern_re.match(s))
+
+    for sheet_name in sorted_sheets:
+        if len(series) >= max_total_rows:
+            break
+        ws = wb[sheet_name]
+        # Pre-scan: find candidate header rows (rows where most cells are period-like)
+        header_rows: list[tuple[int, dict[int, str]]] = []
+        for r in range(1, min(ws.max_row, 200)):
+            row_headers: dict[int, str] = {}
+            period_count = 0
+            for c in range(1, min(ws.max_column, 30) + 1):
+                v = ws.cell(row=r, column=c).value
+                if looks_like_period_header(v):
+                    row_headers[c] = str(v).strip() if not isinstance(v, (int, float)) else str(int(v))
+                    period_count += 1
+            if period_count >= 3:
+                header_rows.append((r, row_headers))
+
+        if not header_rows:
+            continue
+
+        # For each header row, look at subsequent rows for label + values matching the header columns
+        for header_row, headers in header_rows:
+            header_cols = sorted(headers.keys())
+            for r in range(header_row + 1, min(ws.max_row, header_row + 80) + 1):
+                if len(series) >= max_total_rows:
+                    break
+                if series_per_sheet.get(sheet_name, 0) >= max_rows_per_sheet:
+                    break
+
+                # Look left of the first header column for a text label
+                label = None
+                label_cell = None
+                for c in range(1, header_cols[0]):
+                    v = ws.cell(row=r, column=c).value
+                    if isinstance(v, str) and v.strip() and len(v.strip()) >= 3:
+                        label = v.strip()
+                        label_cell = cell_address(r, c)
+                        break
+                if not label:
+                    continue
+
+                # Skip noise labels (Year, Month, etc. — not analytically meaningful)
+                if label.lower().strip(":") in _NOISE_LABELS:
+                    continue
+
+                # Collect values aligned with header columns
+                values = []
+                aligned_headers = []
+                for c in header_cols:
+                    v = ws.cell(row=r, column=c).value
+                    if is_numeric(v):
+                        values.append(v)
+                        aligned_headers.append(headers[c])
+                    else:
+                        values.append(None)
+                        aligned_headers.append(headers[c])
+
+                numeric_count = sum(1 for v in values if v is not None)
+                non_zero_count = sum(1 for v in values if v is not None and v != 0)
+
+                # Skip rows where all values are zero (no signal — typically empty
+                # construction draw rows in dev models)
+                if non_zero_count == 0:
+                    continue
+
+                if numeric_count >= 3:
+                    series.append({
+                        "sheet":      sheet_name,
+                        "label":      label,
+                        "label_cell": label_cell,
+                        "headers":    aligned_headers,
+                        "values":     values,
+                    })
+                    series_per_sheet[sheet_name] = series_per_sheet.get(sheet_name, 0) + 1
+
+    return series
 
 
 def classify_file_layer(file_name):

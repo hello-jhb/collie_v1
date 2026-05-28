@@ -488,9 +488,12 @@ def _ingest_new_files(new_files: list) -> None:
                     st.markdown(f"❌ **{uf.name}** — {result['error']}")
 
                 else:
+                    insight_status = result.get("insight_pass", "?")
+                    insight_emoji = "🤖" if "completed" in insight_status else "⚠️"
                     st.markdown(
                         f"✅ **{uf.name}** → `{result['layer']}` "
-                        f"({result['metric_count']} metrics extracted)"
+                        f"({result['metric_count']} metrics extracted) "
+                        f"· {insight_emoji} Pass 2: {insight_status}"
                     )
 
             if failed_to_classify:

@@ -49,26 +49,43 @@ def complete(system: str, user: str, temperature: float = 0.2) -> str:
 _INSIGHT_SYSTEM = """\
 You are a real estate analyst assisting a structured data pipeline.
 The pipeline has already extracted known metrics from this file using a catalog.
-Your job is TWO things only — do not expand scope beyond these:
+Your job is THREE things — do all three, do not expand beyond these:
 
-1. GAP-FILL: For each metric listed as "NOT FOUND", look in the raw file content
-   and report whether you found it (under any label). If found, report the value
-   and what label it appeared under.
+1. CHARACTERIZE: Identify the asset's high-level characteristics that aren't
+   captured by numeric metrics. The catalog can't capture these because they're
+   inferred from structure, not labeled cells. Be decisive — pick the best label
+   based on the data; use null only when truly unknowable.
 
-2. OBSERVATIONS: Report 3–5 things that are analytically significant but not
-   captured by any catalog metric. Be specific — cite actual values from the file.
-   Examples: unusual debt structure, aggressive rent assumptions, implied strategy
-   not stated explicitly, equity waterfall structure implied by the model logic,
-   hold period, anything that would change how an analyst reads this deal.
+2. GAP-FILL: For each metric listed as "NOT FOUND", look in the raw file content
+   and report whether you found it under any label. If found, report the value
+   and what label it appeared under. Do not invent values.
+
+3. OBSERVATIONS: Report 3–5 things analytically significant but not captured
+   by any catalog metric. Cite actual values from the file. Examples: unusual
+   debt structure (e.g. acquisition + construction loan combined), aggressive
+   assumptions, equity waterfall logic, capital outlay timing, strategy implied
+   by the cost structure.
 
 HARD RULES:
 - Do not re-report metrics already found by the pipeline.
-- Do not invent values. If a missing metric is genuinely absent, say "not found".
+- Do not invent values. If genuinely absent, omit from gap_filled.
 - Be concise. Each observation is one sentence with a specific number.
 - Return ONLY valid JSON. No prose, no markdown fences.
 
 JSON schema:
 {
+  "characterization": {
+    "property_type":        string | null,    // "Multifamily", "Office", "Industrial", "Hotel", "Retail", "Mixed-use", "Multifamily Conversion", "Ground-up Multifamily", etc.
+    "deal_type":            string | null,    // "Acquisition", "Ground-up Development", "Conversion", "Value-Add Renovation", "Refinance", etc.
+    "investment_position":  string | null,    // "GP/Sponsor", "LP", "Co-GP", "JV", or null
+    "strategy":             string | null,    // "Core", "Core-Plus", "Value-Add", "Opportunistic"
+    "asset_name":           string | null,    // The property name if visible in the file
+    "location":             string | null,    // "City, State" if visible
+    "total_units":          number | null,    // Total residential units / keys / doors if visible
+    "total_sf":             number | null,    // Total gross / rentable SF if visible
+    "total_debt":           number | null,    // SUM of all loans (acquisition + construction + mezz if any)
+    "capital_outlay_after_closing": number | null  // CapEx + post-close construction draws + reserves
+  },
   "gap_filled": {
     "<exact metric name from the NOT FOUND list>": {
       "value": <number or string>,

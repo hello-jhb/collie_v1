@@ -34,8 +34,14 @@ This document memorializes the original investment thesis at the time of acquisi
 
 HARD RULES:
 1. Output ONLY the template structure below. Do not add sections, prose, or commentary outside the defined fields.
-2. Every dollar amount and percentage must come from the provided metrics. If a value is not available, write "—".
-3. Do NOT calculate or derive values not explicitly present (exception: simple ratios if both inputs are provided).
+2. Every dollar amount and percentage must come from EITHER the structured metrics OR the RAW INSIGHT PASS section.
+   If a value is not available in either, write "—".
+3. The RAW INSIGHT PASS section contains a "characterization" block with property_type, deal_type, total_units, total_sf,
+   total_debt, capital_outlay_after_closing, asset_name, and location. USE THESE DIRECTLY in the corresponding template fields.
+   Do not write "—" for a template field if the characterization block has a value for it.
+4. For Total Debt: if characterization.total_debt is provided, use it. Otherwise sum Debt Amount + Construction Loan if both exist.
+5. For Total Units: prefer characterization.total_units over the catalog "Total Units" metric (catalog often picks the wrong row of unit mix tables).
+6. Simple derivations allowed: NOI Margin = NOI/EGI, Future Funding = Total All-in Basis - Purchase Price - Closing Costs (if no explicit value).
 4. Strategy MUST be inferred carefully — development/conversion signals override cap rate signals:
    - Opportunistic: ANY of: construction loan present, hard costs > 10% of purchase price,
                     conversion (office-to-resi, hotel-to-resi), ground-up development,
@@ -203,12 +209,28 @@ def generate_deal_review() -> dict[str, Any]:
     # Include raw GPT insights (inferred characteristics, gap-filled metrics)
     # if the insight pass ran at ingest time.
     raw_insights = underwriting.get("raw_insights") or {}
-    insights_block = (
-        "\n\nRAW INSIGHT PASS (GPT-inferred from full workbook scan — "
-        "use to fill gaps the structured metrics above don't cover):\n"
-        + json.dumps(raw_insights, indent=2, default=str)
-        if raw_insights else ""
-    )
+
+    if raw_insights:
+        # Surface characterization FIRST and prominently (don't bury in JSON dump)
+        char  = raw_insights.get("characterization", {}) or {}
+        gaps  = raw_insights.get("gap_filled", {}) or {}
+        obs   = raw_insights.get("observations", []) or []
+
+        insights_block = (
+            "\n\n===== RAW INSIGHT PASS (use these values for template fields) =====\n\n"
+            "CHARACTERIZATION (use directly for matching template fields):\n"
+            + json.dumps(char, indent=2, default=str)
+            + "\n\nGAP-FILLED METRICS (catalog missed these; use them):\n"
+            + json.dumps(gaps, indent=2, default=str)
+            + "\n\nKEY OBSERVATIONS (use for Risk/Mitigant or context):\n"
+            + "\n".join(f"  - {o}" for o in obs)
+            + "\n\n===== END RAW INSIGHT PASS =====\n"
+        )
+    else:
+        insights_block = (
+            "\n\n[Note: RAW INSIGHT PASS did not run — Pass 2 GPT call was skipped. "
+            "Many fields requiring inference (property type, total debt, etc.) will be blank.]"
+        )
 
     user_prompt = TEMPLATE.format(
         metrics_json=json.dumps(metrics_flat, indent=2, default=str) + insights_block,

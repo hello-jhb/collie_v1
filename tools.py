@@ -411,6 +411,138 @@ def run_perf_vs_plan() -> dict[str, Any]:
 
 
 # =============================================================================
+# File inspection tools — let the agent go back to the source file on demand
+# =============================================================================
+
+def list_sheets(filename: str) -> dict[str, Any]:
+    """List sheet names + dimensions for an uploaded Excel file."""
+    import openpyxl
+    file_path = UPLOAD_DIR / filename
+    if not file_path.exists():
+        return {"error": f"File not found: {filename}"}
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        sheets = []
+        for name in wb.sheetnames:
+            ws = wb[name]
+            sheets.append({
+                "name": name,
+                "max_row": ws.max_row,
+                "max_col": ws.max_column,
+            })
+        wb.close()
+        return {"filename": filename, "sheets": sheets, "count": len(sheets)}
+    except Exception as e:
+        return {"error": f"Failed to read {filename}: {type(e).__name__}: {e}"}
+
+
+def read_sheet(filename: str, sheet_name: str, max_rows: int = 80) -> dict[str, Any]:
+    """
+    Read non-empty cells from a specific sheet. Returns up to max_rows rows
+    of labeled values so the agent can read the structure on demand.
+    """
+    import openpyxl
+    file_path = UPLOAD_DIR / filename
+    if not file_path.exists():
+        return {"error": f"File not found: {filename}"}
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        # Case-insensitive sheet matching, partial-match fallback
+        target = None
+        for name in wb.sheetnames:
+            if name.lower() == sheet_name.lower():
+                target = name
+                break
+        if target is None:
+            for name in wb.sheetnames:
+                if sheet_name.lower() in name.lower():
+                    target = name
+                    break
+        if target is None:
+            return {
+                "error": f"Sheet '{sheet_name}' not found in {filename}",
+                "available_sheets": wb.sheetnames,
+            }
+
+        ws = wb[target]
+        rows_out = []
+        for r in range(1, min(ws.max_row, max_rows) + 1):
+            row_cells = []
+            for c in range(1, min(ws.max_column, 30) + 1):
+                v = ws.cell(row=r, column=c).value
+                if v is not None and str(v).strip() != "":
+                    cell_ref = openpyxl.utils.get_column_letter(c) + str(r)
+                    row_cells.append({"cell": cell_ref, "value": v})
+            if row_cells:
+                rows_out.append(row_cells)
+        return {
+            "filename":   filename,
+            "sheet":      target,
+            "row_count":  len(rows_out),
+            "max_row":    ws.max_row,
+            "max_col":    ws.max_column,
+            "rows":       rows_out,
+            "truncated":  ws.max_row > max_rows,
+        }
+    except Exception as e:
+        return {"error": f"Failed to read sheet: {type(e).__name__}: {e}"}
+
+
+def search_file(filename: str, query: str, max_matches: int = 30) -> dict[str, Any]:
+    """
+    Search every sheet for cells whose text contains the query (case-insensitive).
+    Returns location + value of each match so the agent can find specific
+    metrics the catalog didn't capture.
+    """
+    import openpyxl
+    file_path = UPLOAD_DIR / filename
+    if not file_path.exists():
+        return {"error": f"File not found: {filename}"}
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        q = query.lower().strip()
+        matches = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is None:
+                        continue
+                    text = str(cell.value).lower()
+                    if q in text:
+                        # Also grab the nearby value (cell to the right or below)
+                        nearby = None
+                        right = ws.cell(row=cell.row, column=cell.column + 1).value
+                        below = ws.cell(row=cell.row + 1, column=cell.column).value
+                        if isinstance(right, (int, float)):
+                            nearby = {"location": "right", "value": right}
+                        elif isinstance(below, (int, float)):
+                            nearby = {"location": "below", "value": below}
+                        matches.append({
+                            "sheet":  sheet_name,
+                            "cell":   cell.coordinate,
+                            "label":  cell.value,
+                            "nearby_value": nearby,
+                        })
+                        if len(matches) >= max_matches:
+                            break
+                if len(matches) >= max_matches:
+                    break
+            if len(matches) >= max_matches:
+                break
+        wb.close()
+        return {
+            "filename":      filename,
+            "query":         query,
+            "match_count":   len(matches),
+            "matches":       matches,
+            "truncated":     len(matches) >= max_matches,
+        }
+    except Exception as e:
+        return {"error": f"Search failed: {type(e).__name__}: {e}"}
+
+
+# =============================================================================
 # OpenAI function-calling schemas
 # =============================================================================
 
@@ -523,6 +655,52 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    "list_sheets": {
+        "type": "function",
+        "function": {
+            "name": "list_sheets",
+            "description": "List sheet names and dimensions of an uploaded Excel file. Use this when the user asks about a specific sheet by name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Name of a file in the uploads/ folder."},
+                },
+                "required": ["filename"],
+            },
+        },
+    },
+    "read_sheet": {
+        "type": "function",
+        "function": {
+            "name": "read_sheet",
+            "description": "Read non-empty cells from a specific sheet of an uploaded file. Use this when the user asks about content in a sheet that wasn't captured by the catalog extraction (e.g. 'what's in the Growth Rate sheet?'). Returns up to 80 rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename":   {"type": "string", "description": "Name of a file in uploads/."},
+                    "sheet_name": {"type": "string", "description": "Sheet name (case-insensitive, partial match allowed)."},
+                    "max_rows":   {"type": "integer", "description": "Max rows to return (default 80)."},
+                },
+                "required": ["filename", "sheet_name"],
+            },
+        },
+    },
+    "search_file": {
+        "type": "function",
+        "function": {
+            "name": "search_file",
+            "description": "Search every sheet of an uploaded file for cells containing a text query (case-insensitive). Returns matches with cell location and nearby value. Use this when the user asks about a metric or concept that isn't in the structured catalog data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Name of a file in uploads/."},
+                    "query":    {"type": "string", "description": "Text to search for (e.g. 'rent growth', 'cap rate', 'reserve')."},
+                    "max_matches": {"type": "integer", "description": "Max matches to return (default 30)."},
+                },
+                "required": ["filename", "query"],
+            },
+        },
+    },
 }
 
 
@@ -537,6 +715,9 @@ TOOL_IMPLEMENTATIONS: dict[str, Any] = {
     "check_scenario_ready": check_scenario_ready,
     "run_deal_review": run_deal_review,
     "run_perf_vs_plan": run_perf_vs_plan,
+    "list_sheets":  list_sheets,
+    "read_sheet":   read_sheet,
+    "search_file":  search_file,
 }
 
 
@@ -551,6 +732,9 @@ _SHARED_TOOLS = [
     "get_ssot_summary",
     "get_layer_details",
     "check_scenario_ready",
+    "list_sheets",   # follow-up Q&A: "what sheets are in the file?"
+    "read_sheet",    # follow-up Q&A: "what's in the Growth Rate sheet?"
+    "search_file",   # follow-up Q&A: "find anything mentioning rent growth"
 ]
 
 TOOLS_FOR_DEAL_REVIEW = _SHARED_TOOLS + ["run_deal_review"]

@@ -423,14 +423,6 @@ def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:
             reply = agent.send(user_input)
         st.markdown(reply)
     _render_tool_trace(agent)
-    if user_input:
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                reply = agent.send(user_input)
-            st.markdown(reply)
-        _render_tool_trace(agent)
 
 
 _SCENARIO_DEFAULT_LAYER: dict[str, str] = {

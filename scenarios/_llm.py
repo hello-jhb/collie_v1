@@ -57,55 +57,42 @@ def complete(system: str, user: str, temperature: float = 0.2) -> str:
 # ---------------------------------------------------------------------------
 
 _INSIGHT_SYSTEM = """\
-You are a real estate analyst assisting a structured data pipeline.
-The pipeline has already extracted known metrics from this file using a catalog.
-Your job is THREE things — do all three, do not expand beyond these:
+You are a real estate analyst reading a workbook to support a downstream report.
+A deterministic pipeline has already extracted known metrics from this file using
+an alias catalog. The remaining fields — listed under "FIELDS TO FIND" in the
+user message — were either missed by the catalog or are inferred characteristics.
 
-1. CHARACTERIZE: Identify the asset's high-level characteristics that aren't
-   captured by numeric metrics. The catalog can't capture these because they're
-   inferred from structure, not labeled cells. Be decisive — pick the best label
-   based on the data; use null only when truly unknowable.
-
-2. GAP-FILL: For each metric listed as "NOT FOUND", look in the raw file content
-   and report whether you found it under any label. If found, report the value
-   and what label it appeared under. Do not invent values.
-
-3. OBSERVATIONS: Report 3–5 things analytically significant but not captured
-   by any catalog metric. Cite actual values from the file. Examples: unusual
-   debt structure (e.g. acquisition + construction loan combined), aggressive
-   assumptions, equity waterfall logic, capital outlay timing, strategy implied
-   by the cost structure.
+Your job: for EACH field in FIELDS TO FIND, look in the raw workbook content
+and either return a value or omit the field. Plus surface a few observations
+the structured pipeline can't see.
 
 HARD RULES:
-- Do not re-report metrics already found by the pipeline.
-- Do not invent values. If genuinely absent, omit from gap_filled.
-- Be concise. Each observation is one sentence with a specific number.
-- Return ONLY valid JSON. No prose, no markdown fences.
+- For every field in FIELDS TO FIND, scan the raw content. If you find a clear
+  value, include it. If not, omit the field (do not invent).
+- For "Total Debt" type fields: SUM all loans visible (acquisition + construction
+  + mezz + senior). Show the math in label_in_file (e.g. "$15.84M + $35.46M").
+- For "characterization" fields (property_type, deal_type, strategy, position):
+  infer from structure even when no cell is explicitly labeled that way.
+- Numeric fields → return number. Text fields (property_type, etc.) → return string.
+- Do NOT re-report any field marked as ALREADY FOUND.
+- Be decisive on inference. Use null only when truly unknowable.
+- Return ONLY valid JSON. No prose, no markdown fences, no commentary.
 
 JSON schema:
 {
-  "characterization": {
-    "property_type":        string | null,    // "Multifamily", "Office", "Industrial", "Hotel", "Retail", "Mixed-use", "Multifamily Conversion", "Ground-up Multifamily", etc.
-    "deal_type":            string | null,    // "Acquisition", "Ground-up Development", "Conversion", "Value-Add Renovation", "Refinance", etc.
-    "investment_position":  string | null,    // "GP/Sponsor", "LP", "Co-GP", "JV", or null
-    "strategy":             string | null,    // "Core", "Core-Plus", "Value-Add", "Opportunistic"
-    "asset_name":           string | null,    // The property name if visible in the file
-    "location":             string | null,    // "City, State" if visible
-    "total_units":          number | null,    // Total residential units / keys / doors if visible
-    "total_sf":             number | null,    // Total gross / rentable SF if visible
-    "total_debt":           number | null,    // SUM of all loans (acquisition + construction + mezz if any)
-    "capital_outlay_after_closing": number | null  // CapEx + post-close construction draws + reserves
-  },
-  "gap_filled": {
-    "<exact metric name from the NOT FOUND list>": {
-      "value": <number or string>,
-      "label_in_file": "<what the cell actually said>",
-      "sheet": "<sheet name>"
+  "found": {
+    "<field_name_from_FIELDS_TO_FIND>": {
+      "value": <number | string | null>,
+      "label_in_file": "<what cell/section the value came from, OR derivation>",
+      "sheet": "<sheet name if applicable>",
+      "confidence": "high" | "medium" | "low"
     }
   },
   "observations": [
-    "<one sentence with specific value>"
-  ]
+    "<one sentence with specific value — analytically significant items
+     not captured in any field above>"
+  ],
+  "model_summary": "<one sentence: what kind of model is this in plain English?>"
 }
 """
 
@@ -115,7 +102,7 @@ def run_raw_insight_pass(
     layer: str,
     source_file: str,
     found_metric_names: list[str] | None = None,
-    missing_metric_names: list[str] | None = None,
+    fields_to_find: list[dict] | None = None,
 ) -> dict:
     """
     Focused Pass 2: given what the metric catalog already found (found_metric_names)
@@ -168,24 +155,31 @@ def run_raw_insight_pass(
 
     raw_text = "\n".join(lines)
 
-    # Build the user message with explicit found/missing context
+    # Build the user message
     found_block = (
         "ALREADY FOUND BY PIPELINE (do not re-report):\n"
         + "\n".join(f"  - {n}" for n in (found_metric_names or []))
         + "\n"
-    )
-    missing_block = (
-        "\nNOT FOUND — look for these in the raw content below:\n"
-        + "\n".join(f"  - {n}" for n in (missing_metric_names or []))
-        + "\n"
-        if missing_metric_names else
-        "\nNOT FOUND list: (none — all catalog metrics were found)\n"
-    )
+    ) if found_metric_names else ""
+
+    # Format the fields to find. Each entry: {name, type, hint}
+    if fields_to_find:
+        fields_block_lines = ["\nFIELDS TO FIND (scan raw content for each):"]
+        for f in fields_to_find:
+            line = f"  - {f['name']}"
+            if f.get("type"):
+                line += f"  [{f['type']}]"
+            if f.get("hint"):
+                line += f"  — {f['hint']}"
+            fields_block_lines.append(line)
+        fields_block = "\n".join(fields_block_lines) + "\n"
+    else:
+        fields_block = "\nFIELDS TO FIND: (none specified — return characterization only)\n"
 
     user_msg = (
         f"File: {source_file}  |  Layer: {layer}\n\n"
         f"{found_block}"
-        f"{missing_block}"
+        f"{fields_block}"
         f"\nRAW FILE CONTENT:\n{raw_text}"
     )
 

@@ -190,19 +190,31 @@ def generate_perf_vs_plan() -> dict[str, Any]:
     from datetime import datetime
     generated_at = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # Collect raw_insights from all layers so GPT can fill structural gaps
-    # (e.g. inferred occupancy drivers, lease-up pace, debt covenant context).
-    all_insights = {}
+    # Collect raw_insights from all layers so GPT can fill structural gaps.
+    # New Pass 2 schema: {"found": {...}, "observations": [...], "model_summary": "..."}
+    all_insights_blocks = []
     for name, layer_data in {**plan_data, **actuals_data}.items():
         ri = layer_data.get("raw_insights")
-        if ri:
-            all_insights[name] = ri
+        if not ri:
+            continue
+        found  = ri.get("found", {}) or {}
+        obs    = ri.get("observations", []) or []
+        summ   = ri.get("model_summary", "") or ""
+        found_lines = [
+            f"    {fn}: {d['value']}" + (f"  ({d.get('label_in_file','')})" if d.get('label_in_file') else "")
+            for fn, d in found.items() if isinstance(d, dict) and d.get("value") is not None
+        ]
+        all_insights_blocks.append(
+            f"  {name}: {summ}\n"
+            f"    Pass 2 fields:\n"
+            + ("\n".join(found_lines) if found_lines else "    (none)")
+            + (("\n    Observations:\n      - " + "\n      - ".join(obs)) if obs else "")
+        )
 
     insights_block = (
-        "\n\nRAW INSIGHT PASSES (GPT-inferred from full workbook scans — "
-        "use to fill gaps the structured metrics above don't cover):\n"
-        + json.dumps(all_insights, indent=2, default=str)
-        if all_insights else ""
+        "\n\nRAW INSIGHT PASSES (use these to fill gaps not in structured metrics):\n"
+        + "\n".join(all_insights_blocks)
+        if all_insights_blocks else ""
     )
 
     user_prompt = TEMPLATE.format(

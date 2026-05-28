@@ -211,19 +211,28 @@ def generate_deal_review() -> dict[str, Any]:
     raw_insights = underwriting.get("raw_insights") or {}
 
     if raw_insights:
-        # Surface characterization FIRST and prominently (don't bury in JSON dump)
-        char  = raw_insights.get("characterization", {}) or {}
-        gaps  = raw_insights.get("gap_filled", {}) or {}
-        obs   = raw_insights.get("observations", []) or []
+        # New Pass 2 schema: {"found": {field: {value, label_in_file, ...}},
+        #                    "observations": [...], "model_summary": "..."}
+        found_fields = raw_insights.get("found", {}) or {}
+        observations = raw_insights.get("observations", []) or []
+        model_summary = raw_insights.get("model_summary", "") or ""
+
+        # Render found fields as a clean key-value list for GPT
+        found_lines = []
+        for field_name, data in found_fields.items():
+            if isinstance(data, dict) and data.get("value") is not None:
+                found_lines.append(
+                    f"  {field_name}: {data['value']}"
+                    + (f"  ({data.get('label_in_file', '')})" if data.get("label_in_file") else "")
+                )
 
         insights_block = (
-            "\n\n===== RAW INSIGHT PASS (use these values for template fields) =====\n\n"
-            "CHARACTERIZATION (use directly for matching template fields):\n"
-            + json.dumps(char, indent=2, default=str)
-            + "\n\nGAP-FILLED METRICS (catalog missed these; use them):\n"
-            + json.dumps(gaps, indent=2, default=str)
+            "\n\n===== RAW INSIGHT PASS (use these for template fields) =====\n\n"
+            f"MODEL SUMMARY: {model_summary}\n\n"
+            "PASS 2 FOUND FIELDS (use directly to populate matching template rows):\n"
+            + ("\n".join(found_lines) if found_lines else "  (no fields found)")
             + "\n\nKEY OBSERVATIONS (use for Risk/Mitigant or context):\n"
-            + "\n".join(f"  - {o}" for o in obs)
+            + ("\n".join(f"  - {o}" for o in observations) if observations else "  (none)")
             + "\n\n===== END RAW INSIGHT PASS =====\n"
         )
     else:

@@ -107,7 +107,7 @@ def _extract_catalog_suggestions(raw_insights: dict | None) -> list[dict]:
     """
     Pull catalog improvement hints from Pass 2 output.
 
-    When GPT fills a gap (gap_filled section), it records what label it found
+    When GPT finds a field (found section), it records what label it found
     in the file. That label is a candidate alias to add to the metric catalog
     so future files don't need GPT to find the same metric.
 
@@ -116,10 +116,11 @@ def _extract_catalog_suggestions(raw_insights: dict | None) -> list[dict]:
     if not raw_insights:
         return []
     suggestions = []
-    for metric_name, data in raw_insights.get("gap_filled", {}).items():
+    # New schema: raw_insights["found"][field_name] = {value, label_in_file, sheet, confidence}
+    for field_name, data in raw_insights.get("found", {}).items():
         if isinstance(data, dict) and data.get("label_in_file"):
             suggestions.append({
-                "metric_name":    metric_name,
+                "metric_name":    field_name,
                 "found_as_label": data["label_in_file"],
                 "value":          data.get("value"),
                 "sheet":          data.get("sheet"),

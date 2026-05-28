@@ -143,6 +143,149 @@ def ingest_to_ssot(filename: str) -> dict[str, Any]:
     return ingest_to_ssot_with_layer(filename, layer)
 
 
+# =============================================================================
+# Pass 2 field list — what to ask GPT to find for each layer
+# =============================================================================
+#
+# These are the fields the SCENARIOS need that the catalog often can't capture:
+#   - inferred characteristics (property_type, deal_type, strategy)
+#   - derived sums (total_debt = acquisition + construction loans)
+#   - context-dependent fields (capital outlay after closing)
+#   - metrics the catalog might know about but with aliases not matching this
+#     specific model
+#
+# Each entry: {name, type, hint}
+#   name: stable field name the scenario template will reference
+#   type: "number" | "string" — guides GPT's output format
+#   hint: short note on what to look for (helps GPT find non-obvious fields)
+#
+# Adding a new field here makes it available to ALL scenarios. Each scenario's
+# template prompt then decides which of these fields it wants to surface.
+
+_UNDERWRITING_FIELDS_TO_FIND = [
+    # ─── Characterization (inferred, not extracted) ──────────────────────
+    {"name": "property_type",       "type": "string",
+     "hint": "Multifamily / Office / Industrial / Retail / Hotel / Mixed-use / Conversion / Ground-up Development"},
+    {"name": "deal_type",           "type": "string",
+     "hint": "Acquisition / Ground-up Development / Conversion / Value-Add Renovation / Recapitalization"},
+    {"name": "strategy",            "type": "string",
+     "hint": "Core / Core-Plus / Value-Add / Opportunistic — infer from cap rate, occupancy, capex intensity"},
+    {"name": "investment_position", "type": "string",
+     "hint": "GP/Sponsor / LP / Co-GP / JV — infer from waterfall structure if present"},
+    {"name": "asset_name",          "type": "string",
+     "hint": "Property name (often in row 1-3 of summary sheet)"},
+    {"name": "location",            "type": "string",
+     "hint": "City, State or Submarket"},
+
+    # ─── Asset basics ────────────────────────────────────────────────────
+    {"name": "total_units",         "type": "number",
+     "hint": "Total residential units / hotel keys / doors. Often in unit mix total row labeled 'Total / Wtd. Avg.'"},
+    {"name": "total_sf",            "type": "number",
+     "hint": "Total GSF / NRA / GLA — gross or rentable square footage of the asset"},
+
+    # ─── Debt structure ──────────────────────────────────────────────────
+    {"name": "total_debt",          "type": "number",
+     "hint": "SUM of ALL loans (acquisition + construction + mezz). Show derivation in label_in_file."},
+    {"name": "construction_loan",   "type": "number",
+     "hint": "Construction loan / future funding commitment if separate from acquisition loan"},
+    {"name": "loan_term_months",    "type": "number",
+     "hint": "Loan term in months (e.g. '36 months I/O + 24 amortizing' → 60)"},
+    {"name": "io_period_months",    "type": "number",
+     "hint": "Interest-only period in months if specified"},
+    {"name": "ltv",                 "type": "number",
+     "hint": "Loan-to-value (debt / value). May be implied if not labeled — debt / purchase price for stabilized, or debt / stabilized value for dev."},
+
+    # ─── Equity & waterfall ──────────────────────────────────────────────
+    {"name": "lp_equity",           "type": "number",
+     "hint": "LP equity contribution amount in $"},
+    {"name": "gp_equity",           "type": "number",
+     "hint": "GP/Sponsor equity contribution amount in $"},
+    {"name": "lp_gp_split",         "type": "string",
+     "hint": "Equity split as 'XX% LP / XX% GP'"},
+    {"name": "preferred_return",    "type": "number",
+     "hint": "LP preferred return percentage (e.g. 0.08 for 8%)"},
+    {"name": "gp_promote",          "type": "string",
+     "hint": "GP promote structure (e.g. '20% above 8% pref')"},
+
+    # ─── Capital plan ────────────────────────────────────────────────────
+    {"name": "capital_outlay_after_closing", "type": "number",
+     "hint": "Total spend post-close: CapEx + construction draws + interest reserve + post-close soft costs"},
+    {"name": "ti_lc_budget",        "type": "number",
+     "hint": "Tenant improvement and leasing commission budget if present"},
+
+    # ─── NOI bridge ──────────────────────────────────────────────────────
+    {"name": "going_in_noi",        "type": "number",
+     "hint": "NOI at acquisition (year 1, T12, or as-is). May be 0 for ground-up development."},
+    {"name": "stabilized_noi",      "type": "number",
+     "hint": "Stabilized / target NOI after lease-up or business plan completion"},
+    {"name": "noi_uplift_pct",      "type": "number",
+     "hint": "Percentage increase from going-in to stabilized NOI"},
+
+    # ─── Returns the catalog might miss ──────────────────────────────────
+    {"name": "cash_on_cash_year1",  "type": "number",
+     "hint": "Year 1 cash-on-cash return — cash flow after debt service / equity invested"},
+    {"name": "lp_irr",              "type": "number",
+     "hint": "LP-specific IRR (after promote distribution) if modeled separately from deal-level IRR"},
+    {"name": "lp_equity_multiple",  "type": "number",
+     "hint": "LP-specific equity multiple if modeled separately"},
+    {"name": "break_even_occupancy", "type": "number",
+     "hint": "Occupancy required to cover debt service + operating expenses"},
+
+    # ─── Risk context ────────────────────────────────────────────────────
+    {"name": "key_risks",           "type": "string",
+     "hint": "2-3 most material risks visible from the model — lease-up risk, market rent assumption risk, construction cost overrun risk, exit cap rate sensitivity, etc."},
+]
+
+_PERF_VS_PLAN_FIELDS_TO_FIND = [
+    {"name": "reporting_period",    "type": "string",
+     "hint": "What period does this report cover? (Year/Quarter/Month)"},
+    {"name": "property_type",       "type": "string",
+     "hint": "Property type — same options as underwriting"},
+    {"name": "noi",                 "type": "number",
+     "hint": "Actual NOI for the period"},
+    {"name": "revenue",             "type": "number",
+     "hint": "Effective Gross Revenue / Total Revenue for the period"},
+    {"name": "expenses",            "type": "number",
+     "hint": "Total Operating Expenses for the period"},
+    {"name": "occupancy",           "type": "number",
+     "hint": "Physical occupancy as percentage"},
+    {"name": "current_loan_balance", "type": "number",
+     "hint": "Outstanding loan balance at period-end"},
+    {"name": "current_ltv",         "type": "number",
+     "hint": "Current LTV based on most recent value"},
+    {"name": "covenant_status",     "type": "string",
+     "hint": "Debt covenant compliance status if mentioned"},
+    {"name": "key_observations",    "type": "string",
+     "hint": "Notable variances, unusual items, one-time events"},
+]
+
+
+def _build_fields_to_find(layer: str, found_metric_names: list[str]) -> list[dict]:
+    """
+    Return the list of fields Pass 2 should look for, scoped to the layer.
+    Filters out fields whose name overlaps with metrics already found
+    (so Pass 2 doesn't re-do deterministic work).
+    """
+    if layer == "underwriting":
+        base = _UNDERWRITING_FIELDS_TO_FIND
+    elif layer == "business_plan":
+        base = _UNDERWRITING_FIELDS_TO_FIND + _PERF_VS_PLAN_FIELDS_TO_FIND
+    else:
+        base = _PERF_VS_PLAN_FIELDS_TO_FIND
+
+    # Lowercase the found metric names for fuzzy overlap check
+    found_lower = {n.lower() for n in found_metric_names}
+
+    def already_found(field_name: str) -> bool:
+        fn_lower = field_name.lower().replace("_", " ")
+        return any(
+            fn_lower in found.lower() or found.lower() in fn_lower
+            for found in found_metric_names
+        )
+
+    return [f for f in base if not already_found(f["name"])]
+
+
 def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     """
     Classify + extract + GPT insight pass + write to SSOT.
@@ -174,32 +317,17 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     # --- Pass 2: targeted GPT gap-fill + surface insights ---
     raw_insights: dict[str, Any] | None = None
     if llm_available():
-        # Tell GPT exactly what was found and what's still missing so it
-        # doesn't re-do deterministic work — just fills the specific gaps
-        # and surfaces non-catalog observations.
         found_names = [m["metric_name"] for m in extraction["metrics"]]
 
-        full_catalog = load_metric_catalog()
-        layer_catalog = filter_catalog_for_layer(full_catalog, layer)
-
-        # "Expected but missing" = high-priority metrics that belong to
-        # this layer's natural data_nature (e.g. projection/mixed for UW).
-        # Actual-only metrics (CapEx Spent to Date, Current LTV, etc.) are
-        # included in the UW scan for completeness but shouldn't be listed
-        # as "expected" — they won't be in an acquisition model.
-        _natural_nature = {
-            "underwriting":  {"projection", "mixed"},
-            "business_plan": {"projection", "actual", "mixed"},
-        }
-        expected_natures = _natural_nature.get(layer, {"actual", "mixed"})
-
-        missing_names = [
-            m["metric_name"]
-            for m in layer_catalog
-            if m["metric_name"] not in found_names
-            and m.get("priority") == "High"
-            and m.get("data_nature", "mixed") in expected_natures
-        ]
+        # Build the FIELDS TO FIND list for Pass 2.
+        # Pass 2 needs to find:
+        #   (a) Characterization fields (property_type, etc.) that are inferred,
+        #       not catalog-extracted
+        #   (b) Catalog metrics the deterministic pass missed (filtered to ones
+        #       relevant for this layer)
+        #   (c) Derived/summed fields (Total Debt, Capital Outlay After Closing)
+        #       that no single catalog metric captures
+        fields_to_find = _build_fields_to_find(layer, found_names)
 
         labeled_pairs = extract_raw_labeled_pairs(file_path)
         raw_insights = run_raw_insight_pass(
@@ -207,7 +335,7 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
             layer,
             filename,
             found_metric_names=found_names,
-            missing_metric_names=missing_names,
+            fields_to_find=fields_to_find,
         )
 
     # Write both passes to SSOT

@@ -127,9 +127,9 @@ def run_raw_insight_pass(
         return {}
 
     log.info(
-        "Pass 2 START for %s (layer=%s) — %d pairs, %d found, %d missing",
+        "Pass 2 START for %s (layer=%s) — %d pairs, %d found, %d fields to find",
         source_file, layer, len(labeled_pairs),
-        len(found_metric_names or []), len(missing_metric_names or []),
+        len(found_metric_names or []), len(fields_to_find or []),
     )
 
     # Filter to high-quality pairs only:
@@ -203,14 +203,17 @@ def run_raw_insight_pass(
             if raw.startswith("json"):
                 raw = raw[4:]
         parsed = json.loads(raw)
-        char = parsed.get("characterization", {}) or {}
-        gaps = parsed.get("gap_filled", {}) or {}
-        obs  = parsed.get("observations", []) or []
+        # New schema: {"found": {...}, "observations": [...], "model_summary": "..."}
+        found = parsed.get("found", {}) or {}
+        obs   = parsed.get("observations", []) or []
+        summ  = parsed.get("model_summary", "") or ""
+        non_null_count = sum(
+            1 for v in found.values()
+            if isinstance(v, dict) and v.get("value") is not None
+        )
         log.info(
-            "Pass 2 PARSED for %s — characterization=%d fields, gaps=%d, observations=%d",
-            source_file,
-            sum(1 for v in char.values() if v is not None),
-            len(gaps), len(obs),
+            "Pass 2 PARSED for %s — %d fields with values, %d observations, model_summary=%r",
+            source_file, non_null_count, len(obs), summ[:80],
         )
         return parsed
     except json.JSONDecodeError as e:

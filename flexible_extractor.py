@@ -29,6 +29,183 @@ def cell_address(row, col):
     return openpyxl.utils.get_column_letter(col) + str(row)
 
 
+# =============================================================================
+# Sheet priority taxonomy
+# =============================================================================
+# Defines which sheets to look at first when extracting metrics, AND which
+# sheets to skip entirely. Lower tier = higher priority.
+#
+# Rationale: institutional models put deal-level numbers on summary sheets.
+# Cash flow projections live on dedicated CF/proforma sheets. CapEx and debt
+# have their own. Waterfall comes last. Backup/comps/historicals/sensitivities
+# are noise for first-pass extraction and often cause WRONG matches (e.g. an
+# "NOI" label in a market comp sheet overwrites the real underwriting NOI).
+#
+# When the same metric is found on multiple sheets, the match from the
+# lower-tier (higher priority) sheet wins, regardless of confidence.
+
+# Tier definitions use generic categorical keywords that should apply to ANY
+# institutional real estate model regardless of property type or sponsor template.
+#
+# Discipline applied when picking keywords:
+#   - Generic real estate / finance terminology only (not property-type-specific)
+#   - No sheet name from any specific file we've tested
+#   - Each keyword must plausibly appear in models for: multifamily, office,
+#     industrial, retail, hotel, mixed-use, dev, value-add, core, portfolio
+#   - Substring match — keep keywords short enough that variations of the
+#     same concept are caught (e.g. "summary" catches "Deal Summary",
+#     "Investment Summary", "Summary & Assumptions", etc.)
+
+SHEET_PRIORITY_TIERS: list[tuple[int, list[str]]] = [
+    # Tier 1 — deal-level summary (highest priority)
+    # An analyst reading any UW model goes here first.
+    (1, [
+        "summary",          # catches: Deal Summary, Investment Summary, Summary & Assumptions, Executive Summary
+        "one pager", "one-pager", "onepager",
+        "overview", "snapshot", "dashboard", "highlights",
+        "general info",     # catches: General Information
+        "key metric", "key uw", "key input", "key assumption",
+    ]),
+    # Tier 2 — cash flow projections (the proforma)
+    # Time-series of revenue, expenses, NOI by year/quarter/month.
+    (2, [
+        "cash flow", "cashflow",
+        "proforma", "pro forma", "pro-forma",
+        "p&l", "p & l", "pnl",
+        "operating statement", "operating income",
+        "annual cf", "monthly cf", "quarterly cf",
+        "annual cfs", "monthly cfs",
+    ]),
+    # Tier 3 — capital plan
+    (3, [
+        "capex", "cap ex",
+        "capital expenditure", "capital plan", "capital budget",
+        "hard cost", "soft cost",
+        "draw schedule",
+        "construction budget", "construction cost",
+    ]),
+    # Tier 4 — debt structure
+    (4, [
+        "debt", "loan", "financing", "mortgage",
+    ]),
+    # Tier 5 — waterfall / returns
+    (5, [
+        "waterfall", "promote",
+        "return profile", "return metrics", "irr", "yield",
+    ]),
+    # Tier 6 — everything else (scan but lowest priority)
+    (6, []),
+]
+
+# Short standalone sheet names (exact match against lowercased name).
+# These would miss substring matching but are well-known categorical sheets.
+SHEET_TIER_EXACT: dict[str, int] = {
+    # Standalone cash flow / proforma sheets
+    "noi":    2,
+    "cf":     2,
+    "cfs":    2,
+    "pf":     2,   # short for "proforma"
+    # CapEx
+    "capex":  3,
+    "cap ex": 3,
+    # Debt
+    "debt":   4,
+    # Returns / waterfall
+    "irr":    5,
+}
+
+# Sheets to SKIP entirely on first-pass extraction.
+#
+# Discipline:
+#   - ONLY include patterns that are NEARLY CERTAIN to be noise for deal review,
+#     regardless of property type
+#   - When in doubt, leave the sheet in Tier 6 (scanned but low priority) rather
+#     than skipping — Tier 6 will be overridden by Tier 1-5 matches anyway
+#   - Skip categories should be defensible: they either DUPLICATE other data
+#     (backup), or contain data that would WRONGLY match catalog metrics (comp
+#     sales prices matching deal price, sensitivity IRRs matching base-case IRR)
+
+SHEET_SKIP_PATTERNS: list[str] = [
+    # Section header / navigation markers (common sponsor template convention)
+    ">>>", ">>",
+    # Backup / mirror data — these duplicate data from primary sheets
+    "backup", "back-up", "back up",
+    # Comparable / market data — would wrongly map sales-comp cap rates,
+    # ADRs, or pricing to the deal's metrics
+    "comp set", "compset", "comp pnl", "sales comp", "comp tab",
+    # Sensitivity / scenario tables — would wrongly map alternative-case IRRs
+    # and multiples to the deal's base case
+    "sensitivity", "sensitivities", "sensis", "scenario",
+    # Lookup / validation tables (substring matches)
+    "list of values",
+    "data validation", "validation tab",
+]
+
+# Short acronyms / standalone names where substring matching would either miss
+# (too short to space-pad) or cause false matches. Compared exactly against the
+# lowercased sheet name.
+SHEET_SKIP_EXACT: set[str] = {
+    # Lookup / list-of-values / reference tables
+    "lov", "lovs", "lookups", "lookup",
+    # Common short reference / index sheets
+    "refs", "ref", "ref data", "ref tab",
+}
+
+
+def sheet_priority_tier(sheet_name: str) -> int:
+    """
+    Return the priority tier of a sheet (1=highest, 6=lowest, 99=skip).
+    Tier 99 means the sheet should be skipped entirely for metric extraction.
+
+    Resolution order:
+      1. Exact-match skip set (e.g. "lov")
+      2. Substring skip patterns (e.g. ">>>", "compset")
+      3. Exact-match tier set (e.g. "noi" → 2)
+      4. Substring tier patterns (e.g. "summary" → 1)
+      5. Default Tier 6
+    """
+    name_lower = sheet_name.lower().strip()
+
+    # 1. Exact-match skip
+    if name_lower in SHEET_SKIP_EXACT:
+        return 99
+
+    # 2. Substring skip
+    for pattern in SHEET_SKIP_PATTERNS:
+        if pattern in name_lower:
+            return 99
+
+    # 3. Exact-match tier (short standalone codes)
+    if name_lower in SHEET_TIER_EXACT:
+        return SHEET_TIER_EXACT[name_lower]
+
+    # 4. Substring tier patterns
+    for tier, keywords in SHEET_PRIORITY_TIERS:
+        for kw in keywords:
+            if kw in name_lower:
+                return tier
+
+    # 5. Default
+    return 6
+
+
+def is_skip_sheet(sheet_name: str) -> bool:
+    """True if this sheet should be skipped on first-pass extraction."""
+    return sheet_priority_tier(sheet_name) == 99
+
+
+def sorted_sheets_by_priority(sheet_names: list[str], exclude_skipped: bool = True) -> list[str]:
+    """
+    Return sheet names sorted by priority tier (highest first).
+    Skip-tier sheets are excluded by default.
+    """
+    if exclude_skipped:
+        candidates = [s for s in sheet_names if sheet_priority_tier(s) != 99]
+    else:
+        candidates = list(sheet_names)
+    return sorted(candidates, key=lambda s: sheet_priority_tier(s))
+
+
 # Column-header keywords used by table-aware extraction. Order = preference.
 # When the header row of a table contains one of these keywords, the matching
 # column is preferred over generic "first value to the right".
@@ -230,23 +407,48 @@ def filter_catalog_for_layer(catalog: list, layer: str) -> list:
     ]
 
 
+# Caps for per-sheet scanning — bound worst-case work on huge files (St Regis
+# has 15M cells, the catalog only cares about labels near the top of each sheet).
+_MAX_ROWS_PER_SHEET = 250
+_MAX_COLS_PER_SHEET = 60
+
+
 def scan_workbook_for_all_metrics(file_path, catalog):
     """
     Load the workbook ONCE and scan all catalog metrics in a single pass.
 
-    This is the fast path used by v2's tools.extract_from_file. It replaces
-    the prior pattern of calling scan_workbook_for_metric in a loop, which
-    re-loaded the same Excel file once per metric (≈97x per file).
+    Sheet priority taxonomy (sheet_priority_tier):
+      Tier 1: Summary, Deal Summary, One Pager, Executive Summary, etc.
+      Tier 2: Cash flow projections (Annual CF, Proforma, P&L, NOI)
+      Tier 3: CapEx / capital plan
+      Tier 4: Debt structure
+      Tier 5: Waterfall / returns
+      Tier 6: Other analytically interesting (not skipped)
+      Tier 99: SKIP — backup, comps, sensitivities, historical, market data
+
+    When the same metric is found on multiple sheets, the LOWER-tier sheet
+    (higher priority — closer to deal-level summary) wins. This stops the
+    extractor from grabbing values from sensitivity tabs, comp sets, or
+    historical years and labeling them as the deal's underwriting.
+
+    Performance:
+      - openpyxl read_only mode (streams cells, avoids loading whole workbook)
+      - skip-tier sheets are not opened at all
+      - cell iteration is bounded at 250 rows × 60 cols per sheet
 
     Returns {metric_id: best_match_dict_or_None} for every metric in the catalog.
     """
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
     except Exception:
-        return {m["metric_id"]: None for m in catalog}
+        # Fall back to non-read-only mode in case the file has features that
+        # break the streaming reader
+        try:
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+        except Exception:
+            return {m["metric_id"]: None for m in catalog}
 
     # Pre-normalize every alias once, paired with its parent metric.
-    # Each entry: (normalized_alias_text, metric_dict, original_alias_string)
     alias_index = []
     for metric in catalog:
         for alias in metric.get("aliases", []):
@@ -257,28 +459,23 @@ def scan_workbook_for_all_metrics(file_path, catalog):
     matches_by_metric: dict = {m["metric_id"]: [] for m in catalog}
     file_name = Path(file_path).name
 
-    # Scan high-signal sheets first so their matches win ties.
-    # Annual summary/assumption sheets contain the definitive values;
-    # monthly detail tabs often have the same labels with partial/zero values.
-    _PRIORITY_SHEET_KEYWORDS = [
-        "summary", "assumption", "sources", "uses", "return",
-        "waterfall", "annual", "overview", "irr", "exit",
-        "proforma", "pro forma", "debt", "equity",
-    ]
+    # Use the centralized priority taxonomy — skips noise sheets entirely
+    candidate_sheets = sorted_sheets_by_priority(wb.sheetnames, exclude_skipped=True)
 
-    def _sheet_priority(name: str) -> int:
-        nl = name.lower()
-        if any(kw in nl for kw in _PRIORITY_SHEET_KEYWORDS):
-            return 0
-        if "monthly" in nl or "month" in nl:
-            return 2   # monthly detail — scan last
-        return 1
-
-    sorted_sheet_names = sorted(wb.sheetnames, key=_sheet_priority)
-
-    for sheet_name in sorted_sheet_names:
+    for sheet_name in candidate_sheets:
+        sheet_tier = sheet_priority_tier(sheet_name)
         ws = wb[sheet_name]
-        for row in ws.iter_rows():
+
+        # Bound iteration per sheet — needed for huge models (15M cells)
+        # In read_only mode, we iterate streaming so this just exits early.
+        row_count = 0
+        for row in ws.iter_rows(
+            min_row=1, max_row=_MAX_ROWS_PER_SHEET,
+            min_col=1, max_col=_MAX_COLS_PER_SHEET,
+        ):
+            row_count += 1
+            if row_count > _MAX_ROWS_PER_SHEET:
+                break
             for cell in row:
                 cell_text = normalize_text(cell.value)
                 if not cell_text:
@@ -293,13 +490,13 @@ def scan_workbook_for_all_metrics(file_path, catalog):
                     # interest"). An exact or near-exact label match scores 1.0;
                     # a substring-in-long-label scores proportionally lower.
                     label_ratio = len(alias_text) / max(len(cell_text), 1)
-                    # Also penalise if alias appears mid-word (e.g. "irr" in "irrespective")
+                    # Also penalise if alias appears mid-word
                     idx = cell_text.find(alias_text)
                     char_before = cell_text[idx - 1] if idx > 0 else " "
                     char_after  = cell_text[idx + len(alias_text)] if idx + len(alias_text) < len(cell_text) else " "
                     mid_word = char_before.isalpha() or char_after.isalpha()
                     if mid_word:
-                        continue  # alias embedded inside a longer word — skip
+                        continue
 
                     value, value_cell, direction = find_nearby_value(
                         ws, cell.row, cell.column,
@@ -308,43 +505,48 @@ def scan_workbook_for_all_metrics(file_path, catalog):
                     if value is None:
                         continue
 
-                    # Confidence tiers:
-                    #   "exact"  — alias covers ≥80% of the cell label, value right/below
-                    #   "high"   — value right/below (alias may be partial label)
-                    #   "medium" — value found nearby
-                    #   "partial"— alias is a small fragment of a longer label (label_ratio < 0.4)
-                    if direction in ("right", "below"):
+                    # Confidence tiers
+                    if direction in ("right", "below", "table-column"):
                         confidence = "exact" if label_ratio >= 0.8 else "high"
                     else:
                         confidence = "partial" if label_ratio < 0.4 else "medium"
 
                     matches_by_metric[metric["metric_id"]].append({
-                        "metric_id": metric["metric_id"],
-                        "metric_name": metric["metric_name"],
-                        "category": metric["category"],
-                        "definition": metric["definition"],
-                        "value": value,
-                        "source_file": file_name,
-                        "sheet": sheet_name,
-                        "label_cell": cell.coordinate,
-                        "value_cell": value_cell,
-                        "matched_alias": original_alias,
-                        "confidence": confidence,
-                        "label_ratio": round(label_ratio, 2),
-                        "match_method": direction,
+                        "metric_id":      metric["metric_id"],
+                        "metric_name":    metric["metric_name"],
+                        "category":       metric["category"],
+                        "definition":     metric["definition"],
+                        "value":          value,
+                        "source_file":    file_name,
+                        "sheet":          sheet_name,
+                        "sheet_tier":     sheet_tier,         # NEW: drives match ranking
+                        "label_cell":     cell.coordinate,
+                        "value_cell":     value_cell,
+                        "matched_alias":  original_alias,
+                        "confidence":     confidence,
+                        "label_ratio":    round(label_ratio, 2),
+                        "match_method":   direction,
                     })
 
-    # Best match per metric — ranked by confidence tier then label quality.
-    # Tier order: exact > high > medium > partial
-    _TIER = {"exact": 0, "high": 1, "medium": 2, "partial": 3}
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    # Best match per metric. Ranking order:
+    #   1. Sheet tier (lower = higher priority — Summary beats Cash Flow beats Backup)
+    #   2. Confidence tier (exact > high > medium > partial)
+    #   3. Label ratio (higher = better alias match quality)
+    _CONF_TIER = {"exact": 0, "high": 1, "medium": 2, "partial": 3}
     best = {}
     for metric_id, matches in matches_by_metric.items():
         if not matches:
             best[metric_id] = None
         else:
             matches.sort(key=lambda x: (
-                _TIER.get(x["confidence"], 9),
-                -x.get("label_ratio", 0),  # higher label_ratio wins ties
+                x.get("sheet_tier", 99),
+                _CONF_TIER.get(x["confidence"], 9),
+                -x.get("label_ratio", 0),
             ))
             best[metric_id] = matches[0]
     return best
@@ -438,23 +640,15 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
     Capped at max_pairs. Priority sheets (summary, assumptions, waterfall) come first.
     """
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
     except Exception:
-        return []
+        try:
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+        except Exception:
+            return []
 
-    # Prioritise summary/assumption sheets so if we hit the cap we keep the
-    # most analytically relevant rows.
-    priority_keywords = [
-        "summary", "assumption", "return", "waterfall", "overview",
-        "sources", "uses", "debt", "equity", "cashflow", "cash flow",
-        "proforma", "pro forma", "irr", "exit",
-    ]
-
-    def sheet_priority(name: str) -> int:
-        nl = name.lower()
-        return 0 if any(kw in nl for kw in priority_keywords) else 1
-
-    sorted_sheets = sorted(wb.sheetnames, key=sheet_priority)
+    # Use the centralized priority taxonomy — skip-tier sheets are excluded entirely
+    sorted_sheets = sorted_sheets_by_priority(wb.sheetnames, exclude_skipped=True)
 
     pairs = []
     seen_labels: set[str] = set()
@@ -463,14 +657,19 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
         if len(pairs) >= max_pairs:
             break
         ws = wb[sheet_name]
-        for row in ws.iter_rows():
+        tier = sheet_priority_tier(sheet_name)
+
+        # Bound iteration per sheet — needed for huge models
+        for row in ws.iter_rows(
+            min_row=1, max_row=_MAX_ROWS_PER_SHEET,
+            min_col=1, max_col=_MAX_COLS_PER_SHEET,
+        ):
             if len(pairs) >= max_pairs:
                 break
             for cell in row:
                 cell_text = clean_text(cell.value)
                 if not cell_text or len(cell_text) < 3:
                     continue
-                # Only process text cells (labels)
                 if not isinstance(cell.value, str):
                     continue
 
@@ -480,21 +679,25 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
                 if value is None:
                     continue
 
-                # Deduplicate by (sheet, normalised label) to avoid
-                # repeated header rows skewing GPT's reading.
                 key = f"{sheet_name}|{normalize_text(cell_text)}"
                 if key in seen_labels:
                     continue
                 seen_labels.add(key)
 
                 pairs.append({
-                    "sheet":     sheet_name,
-                    "label":     cell_text,
-                    "value":     value,
-                    "cell":      value_cell,
-                    "direction": direction,
-                    "label_len": len(cell_text),
+                    "sheet":      sheet_name,
+                    "sheet_tier": tier,
+                    "label":      cell_text,
+                    "value":      value,
+                    "cell":       value_cell,
+                    "direction":  direction,
+                    "label_len":  len(cell_text),
                 })
+
+    try:
+        wb.close()
+    except Exception:
+        pass
 
     return pairs
 
@@ -526,15 +729,20 @@ def extract_time_series_rows(file_path, max_rows_per_sheet: int = 25, max_total_
     except Exception:
         return []
 
-    # Prioritise cash flow / proforma sheets
-    cf_keywords = ["annual", "cash flow", "cashflow", "cf", "proforma", "pro forma",
-                   "operating", "monthly", "schedule"]
+    # For time series we want CF/proforma sheets first; use the centralized
+    # taxonomy but resort so cash flow tier (2) leads.
+    # Skip-tier sheets are excluded.
+    def cf_first(name: str) -> int:
+        t = sheet_priority_tier(name)
+        if t == 99:
+            return 99
+        # Boost cash flow tier to top (we want time series from CF sheets)
+        if t == 2:
+            return 0
+        return t
 
-    def sheet_priority(name: str) -> int:
-        nl = name.lower()
-        return 0 if any(kw in nl for kw in cf_keywords) else 1
-
-    sorted_sheets = sorted(wb.sheetnames, key=sheet_priority)
+    candidates = [s for s in wb.sheetnames if sheet_priority_tier(s) != 99]
+    sorted_sheets = sorted(candidates, key=cf_first)
 
     # Labels to skip — meta/structural rows that aren't analytically interesting
     _NOISE_LABELS = {"year", "month", "period", "day", "date", "row", "n/a"}

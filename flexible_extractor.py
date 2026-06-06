@@ -438,15 +438,14 @@ def scan_workbook_for_all_metrics(file_path, catalog):
 
     Returns {metric_id: best_match_dict_or_None} for every metric in the catalog.
     """
+    # Do NOT use read_only here. read_only mode makes random cell access
+    # (used by find_nearby_value to scan nearby cells) extremely slow because
+    # openpyxl seeks the file on every ws.cell(row, col) call. For metric
+    # extraction we need fast random access far more than fast streaming.
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        wb = openpyxl.load_workbook(file_path, data_only=True)
     except Exception:
-        # Fall back to non-read-only mode in case the file has features that
-        # break the streaming reader
-        try:
-            wb = openpyxl.load_workbook(file_path, data_only=True)
-        except Exception:
-            return {m["metric_id"]: None for m in catalog}
+        return {m["metric_id"]: None for m in catalog}
 
     # Pre-normalize every alias once, paired with its parent metric.
     alias_index = []

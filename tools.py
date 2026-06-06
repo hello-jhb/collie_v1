@@ -334,42 +334,52 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     if layer not in ssot.KNOWN_LAYERS:
         return {"error": f"Unknown layer: {layer!r}. Valid: {sorted(ssot.KNOWN_LAYERS)}"}
 
+    import time
+    t_start = time.time()
+
     file_path = UPLOAD_DIR / filename
 
     # --- Inventory all sheets by tier so the chat agent knows what's available
     # for on-demand reads (sensitivities, scenarios, comps were intentionally
     # skipped during bulk extraction but they're still in the file).
+    t0 = time.time()
     sheet_inventory = _inventory_sheets_by_tier(file_path)
+    t_inventory = time.time() - t0
+    _log.info(
+        "INGEST %s — sheet inventory done in %.1fs (%d total, %d skipped, %d scanned)",
+        filename, t_inventory,
+        len(sheet_inventory["all_sheets"]),
+        len(sheet_inventory["skipped_sheets"]),
+        len(sheet_inventory["all_sheets"]) - len(sheet_inventory["skipped_sheets"]),
+    )
 
     # --- Pass 1: deterministic metric extraction ---
+    t0 = time.time()
     extraction = extract_from_file(filename, layer=layer)
+    t_pass1 = time.time() - t0
     if "error" in extraction:
         return extraction
 
     _log.info(
-        "INGEST %s as layer=%s — Pass 1 found %d metrics, llm_available=%s, "
-        "skipped_sheets=%d, low_priority_sheets=%d",
-        filename, layer, extraction["extracted_count"], llm_available(),
-        len(sheet_inventory["skipped_sheets"]),
-        len(sheet_inventory["low_priority_sheets"]),
+        "INGEST %s — Pass 1 done in %.1fs (%d metrics found, llm=%s)",
+        filename, t_pass1, extraction["extracted_count"], llm_available(),
     )
 
     # --- Pass 2: targeted GPT gap-fill + surface insights ---
     raw_insights: dict[str, Any] | None = None
     if llm_available():
         found_names = [m["metric_name"] for m in extraction["metrics"]]
-
-        # Build the FIELDS TO FIND list for Pass 2.
-        # Pass 2 needs to find:
-        #   (a) Characterization fields (property_type, etc.) that are inferred,
-        #       not catalog-extracted
-        #   (b) Catalog metrics the deterministic pass missed (filtered to ones
-        #       relevant for this layer)
-        #   (c) Derived/summed fields (Total Debt, Capital Outlay After Closing)
-        #       that no single catalog metric captures
         fields_to_find = _build_fields_to_find(layer, found_names)
 
+        t0 = time.time()
         labeled_pairs = extract_raw_labeled_pairs(file_path)
+        t_pairs = time.time() - t0
+        _log.info(
+            "INGEST %s — extracted %d raw pairs in %.1fs",
+            filename, len(labeled_pairs), t_pairs,
+        )
+
+        t0 = time.time()
         raw_insights = run_raw_insight_pass(
             labeled_pairs,
             layer,
@@ -377,6 +387,8 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
             found_metric_names=found_names,
             fields_to_find=fields_to_find,
         )
+        t_pass2 = time.time() - t0
+        _log.info("INGEST %s — Pass 2 (GPT) done in %.1fs", filename, t_pass2)
 
     # Write both passes to SSOT (sheet inventory included so the agent can see
     # which sheets exist but were intentionally not bulk-extracted)
@@ -390,6 +402,9 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
 
     # Recompute derived metrics now that SSOT has new data
     calc_result = calculations.calculate_derived_metrics()
+
+    t_total = time.time() - t_start
+    _log.info("INGEST %s — TOTAL %.1fs", filename, t_total)
 
     return {
         "filename":             filename,

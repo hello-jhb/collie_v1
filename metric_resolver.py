@@ -27,14 +27,14 @@ from __future__ import annotations
 from typing import Any
 
 
-RESOLVER_VERSION = "phase1.v1"
+RESOLVER_VERSION = "phase1_5b.v1"
 
 
 # ---------------------------------------------------------------------------
 # Schema-driven validation
 # ---------------------------------------------------------------------------
 
-def _validate_against_range(value: float, schema: dict) -> tuple[bool, str | None]:
+def _validate_against_range(value, schema: dict) -> tuple[bool, str | None]:
     """
     Return (passes, scale_correction_factor or None).
 
@@ -43,6 +43,11 @@ def _validate_against_range(value: float, schema: dict) -> tuple[bool, str | Non
     If value × 1_000_000 is in range → passes=True, returns 1_000_000.
     Otherwise → passes=False.
     """
+    # Non-numeric units (text, date) don't have numeric ranges — accept as-is
+    unit = schema.get("unit")
+    if unit in ("text", "date"):
+        return True, None
+
     rmin = schema.get("range_min")
     rmax = schema.get("range_max")
     if rmin is None and rmax is None:
@@ -89,6 +94,13 @@ def _format_display(value, unit: str | None, scale: str | None) -> str:
     if value is None:
         return "—"
     if unit == "text":
+        return str(value)
+    if unit == "date":
+        import datetime as _dt
+        if isinstance(value, _dt.datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, _dt.date):
+            return value.isoformat()
         return str(value)
     try:
         v = float(value)

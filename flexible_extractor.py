@@ -21,6 +21,25 @@ def is_numeric(value):
     return isinstance(value, (int, float)) and not pd.isna(value)
 
 
+def is_datetime(value):
+    """Excel date cells come through as datetime.datetime via openpyxl."""
+    import datetime as _dt
+    return isinstance(value, (_dt.datetime, _dt.date))
+
+
+def is_value_for_metric(value, metric_unit: str | None = None):
+    """
+    Accept numeric values universally, plus datetime values when the metric
+    explicitly expects a date (unit == 'date'). Used so Phase 1.5a's date
+    anchor metrics (Purchase Date, Exit Date) can find date cells.
+    """
+    if is_numeric(value):
+        return True
+    if metric_unit == "date" and is_datetime(value):
+        return True
+    return False
+
+
 def normalize_text(value):
     return clean_text(value).lower()
 
@@ -301,7 +320,7 @@ def _pick_column_for_metric(headers: dict, metric_name_lower: str) -> int | None
     return None
 
 
-def find_nearby_value(ws, row, col, metric_name: str = ""):
+def find_nearby_value(ws, row, col, metric_name: str = "", metric_unit: str | None = None):
     """
     Find the value associated with a labeled cell.
 
@@ -313,7 +332,21 @@ def find_nearby_value(ws, row, col, metric_name: str = ""):
       4. Otherwise fall back to first non-zero value
       5. If no values right, look below
       6. Last resort: nearby grid scan
+
+    metric_unit (Phase 1.5a) — if "date", datetime cells are accepted as values.
     """
+
+    # Phase 1.5a — date-anchor metrics: scan for datetime cells directly.
+    if metric_unit == "date":
+        for offset in range(1, 8):
+            v = ws.cell(row=row, column=col + offset).value
+            if is_datetime(v):
+                return v, cell_address(row, col + offset), "right"
+        for offset in range(1, 6):
+            v = ws.cell(row=row + offset, column=col).value
+            if is_datetime(v):
+                return v, cell_address(row + offset, col), "below"
+        return None, None, None
 
     data_cols = _scan_data_columns(ws, row, col)
 
@@ -563,7 +596,7 @@ def scan_workbook_for_all_metrics(file_path, catalog):
 # Same scan loop as scan_workbook_for_all_metrics, but stores candidates
 # unfiltered.
 
-EXTRACTOR_VERSION = "phase1.v1"
+EXTRACTOR_VERSION = "phase1_5a.v1"
 
 
 def scan_workbook_for_candidates(file_path, catalog):
@@ -626,6 +659,7 @@ def scan_workbook_for_candidates(file_path, catalog):
                     value, value_cell, direction = find_nearby_value(
                         ws, cell.row, cell.column,
                         metric_name=metric["metric_name"],
+                        metric_unit=metric.get("unit"),
                     )
                     if value is None:
                         continue

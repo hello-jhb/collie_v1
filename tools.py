@@ -34,6 +34,7 @@ from flexible_extractor import (
 )
 from metric_catalog import CATALOG_VERSION
 from metric_resolver import resolve_metric, make_cache_key, RESOLVER_VERSION
+from metric_fallback import fallback_find_metric, FALLBACK_VERSION
 import extraction_cache
 from scenarios._llm import run_raw_insight_pass, llm_available
 
@@ -364,13 +365,52 @@ def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, boo
 
     candidates_by_metric = scan_workbook_for_candidates(file_path, bounded)
 
+    # Compute available sheets once for fallback (Phase 1.5b)
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        available_sheets = list(wb.sheetnames)
+        wb.close()
+    except Exception:
+        available_sheets = []
+
     bounded_metrics: dict[str, Any] = {}
+    fallback_uses = 0
     for metric in bounded:
         cands = candidates_by_metric.get(metric["metric_id"], [])
         record = resolve_metric(metric, cands)
+
+        # Phase 1.5b — GPT-as-reader fallback for zero-candidate cases.
+        # Only fires when:
+        #   (a) the metric has zero candidates (catalog truly missed it), AND
+        #   (b) the LLM is available, AND
+        #   (c) the metric has preferred_sheets defined (avoids unbounded scans).
+        if (
+            record["status"] == "missing"
+            and llm_available()
+            and metric.get("preferred_sheets")
+        ):
+            fallback_cand = fallback_find_metric(metric, file_path, available_sheets)
+            if fallback_cand:
+                fallback_uses += 1
+                # Re-resolve using the fallback candidate so schema validation still applies
+                record = resolve_metric(metric, [fallback_cand])
+                # Annotate where the value came from
+                record.setdefault("validation_notes", []).insert(
+                    0,
+                    f"Found via GPT fallback (catalog had 0 candidates). "
+                    f"Reasoning: {fallback_cand.get('fallback_reasoning', '')[:140]}",
+                )
+
         # Trim candidate list to keep cache size sane — keep top 5 only
         record["candidates"] = record["candidates"][:5]
         bounded_metrics[metric["metric_name"]] = record
+
+    if fallback_uses:
+        _log.info(
+            "BOUNDED-METRICS for %s — GPT fallback used %d times",
+            file_path.name, fallback_uses,
+        )
 
     # Cache the result
     extraction_cache.save_cache(

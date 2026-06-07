@@ -9,7 +9,7 @@ REPOSITORY_DIR = Path("repository")
 # Catalog version — bump whenever the schema or alias lists change in a way
 # that should invalidate cached extraction results. Used as part of the
 # versioned cache key.
-CATALOG_VERSION = "phase1.v1"
+CATALOG_VERSION = "phase1_5a.v1"
 
 
 # -----------------------------
@@ -251,6 +251,9 @@ def load_metric_catalog(path=CATALOG_PATH):
         preferred_sheets = split_list(preferred_sheets_text)
         in_bounded_list_raw = get_col(row, col_map, ["in_bounded_list", "In Bounded List"])
         in_bounded_list = str(in_bounded_list_raw).strip().lower() in ("true", "1", "yes", "y")
+        # Phase 1.5a — property-type restriction (empty = applies to all)
+        applies_to_pt_text = get_col(row, col_map, ["applies_to_property_types", "Applies To Property Types"])
+        applies_to_property_types = split_list(applies_to_pt_text)
 
         aliases = build_aliases(metric_name, aliases_text)
 
@@ -278,6 +281,8 @@ def load_metric_catalog(path=CATALOG_PATH):
             "range_max":         range_max,
             "preferred_sheets":  preferred_sheets,
             "in_bounded_list":   in_bounded_list,
+            # Phase 1.5a — property-type restriction
+            "applies_to_property_types": applies_to_property_types,
         }
 
         catalog.append(metric)

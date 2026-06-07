@@ -146,6 +146,37 @@ SCHEMA_RULES: dict[str, dict] = {
         "preferred_sheets": "capex; sources & uses; budget; summary",
     },
 
+    # ── Multi-Property Detection (Phase 1.5a) ────────────────────────
+    "Number of Properties": {
+        "unit": "count", "scale": "actual", "period": "n/a",
+        "range_min": 1, "range_max": 100,
+        "preferred_sheets": "general info; investment summary; one pager",
+    },
+
+    # ── Date Anchors for Hold Period (Phase 1.5a) ────────────────────
+    "Purchase Date": {
+        "unit": "date", "scale": "n/a", "period": "at_close",
+        "range_min": None, "range_max": None,
+        "preferred_sheets": "general info; investment summary; key uw",
+    },
+    "Exit Date": {
+        "unit": "date", "scale": "n/a", "period": "exit",
+        "range_min": None, "range_max": None,
+        "preferred_sheets": "general info; investment summary; key uw; returns",
+    },
+
+    # ── Floating-Rate Debt Structure (Phase 1.5a) ────────────────────
+    "Interest Rate Spread": {
+        "unit": "ratio", "scale": "actual", "period": "at_close",
+        "range_min": 0.001, "range_max": 0.10,
+        "preferred_sheets": "debt; debt information",
+    },
+    "Interest Rate Cap": {
+        "unit": "ratio", "scale": "actual", "period": "at_close",
+        "range_min": 0.001, "range_max": 0.10,
+        "preferred_sheets": "debt; debt information",
+    },
+
     # ── Returns ──────────────────────────────────────────────────────
     "Levered IRR": {
         "unit": "ratio", "scale": "actual", "period": "n/a",

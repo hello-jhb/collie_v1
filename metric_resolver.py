@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 
-RESOLVER_VERSION = "phase3.v1"  # authority-first section reader is primary path
+RESOLVER_VERSION = "phase3.v2"  # robust value parsing + primary-source enforcement
 
 
 # ---------------------------------------------------------------------------
@@ -317,16 +317,82 @@ def _role_of_sheet(sheet_name, sheet_role_map) -> str | None:
     return None
 
 
+def parse_numeric_value(raw, unit: str | None = None):
+    """
+    Robustly coerce a GPT-returned value into a number where the metric is
+    numeric. Handles the formats GPT commonly emits:
+        "$287,425"     → 287425.0
+        "287,425"      → 287425.0
+        "8.17%"        → 0.0817      (percent → fraction)
+        "0.0817"       → 0.0817
+        "(2,719,030)"  → -2719030.0  (accounting negatives)
+        "2.0x"         → 2.0
+        "$192.0M"      → 192000000.0
+        "5 years"      → 5.0
+        123 / 1.4      → unchanged
+
+    Returns (parsed_value, ok). For text/date units, returns (raw, True) so the
+    caller keeps the string. ok=False means it couldn't be parsed as a number.
+    """
+    if unit in ("text", "date"):
+        return raw, True
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw), True
+    if not isinstance(raw, str):
+        return raw, False
+
+    s = raw.strip()
+    if not s:
+        return raw, False
+
+    # Accounting negative: (1,234) → -1,234
+    negative = False
+    if s.startswith("(") and s.endswith(")"):
+        negative = True
+        s = s[1:-1].strip()
+
+    is_percent = s.endswith("%")
+    # Magnitude suffixes
+    mult = 1.0
+    low = s.lower()
+    if low.endswith("m") and not low.endswith("mm"):
+        mult, s = 1_000_000.0, s[:-1]
+    elif low.endswith("mm"):
+        mult, s = 1_000_000.0, s[:-2]
+    elif low.endswith("bn") or low.endswith("b"):
+        mult, s = 1_000_000_000.0, s.rstrip("bBnN")
+    elif low.endswith("k"):
+        mult, s = 1_000.0, s[:-1]
+    elif low.endswith("x"):
+        s = s[:-1]  # multiple, no magnitude change
+
+    # Strip currency, commas, %, stray words (years, months), whitespace
+    import re as _re
+    s = s.replace("$", "").replace(",", "").replace("%", "")
+    s = _re.sub(r"[a-zA-Z]+", "", s).strip()
+
+    try:
+        num = float(s) * mult
+    except (ValueError, TypeError):
+        return raw, False
+
+    if negative:
+        num = -num
+    if is_percent:
+        num = num / 100.0
+    return num, True
+
+
 def _values_disagree(a, b, tol: float = 0.02) -> bool:
     """True if two values differ beyond tolerance (2% for numbers; exact for text)."""
-    try:
-        fa, fb = float(a), float(b)
-        if fa == fb:
+    pa, oka = parse_numeric_value(a)
+    pb, okb = parse_numeric_value(b)
+    if oka and okb and isinstance(pa, (int, float)) and isinstance(pb, (int, float)):
+        if pa == pb:
             return False
-        denom = max(abs(fa), abs(fb), 1e-9)
-        return abs(fa - fb) / denom > tol
-    except (TypeError, ValueError):
-        return str(a).strip().lower() != str(b).strip().lower()
+        denom = max(abs(pa), abs(pb), 1e-9)
+        return abs(pa - pb) / denom > tol
+    return str(a).strip().lower() != str(b).strip().lower()
 
 
 def build_section_record(metric: dict, extraction: dict, sheet_role_map: dict | None) -> dict | None:
@@ -356,21 +422,45 @@ def build_section_record(metric: dict, extraction: dict, sheet_role_map: dict | 
     if not extraction or not extraction.get("found"):
         return None
 
-    value = extraction.get("value")
+    raw_value = extraction.get("value")
     sheet = extraction.get("sheet")
     cell  = extraction.get("cell")
     role  = _role_of_sheet(sheet, sheet_role_map)
     reasoning = extraction.get("reasoning", "")
 
-    if value in (None, "", "—"):
+    if raw_value in (None, "", "—"):
+        return None
+
+    # Gate 1.5 — ROBUST NUMERIC PARSING.
+    # GPT returns "$287,425", "8.17%", "(2,719,030)", "$192M", etc. Coerce to a
+    # number before range validation; text/date pass through unchanged.
+    value, parse_ok = parse_numeric_value(raw_value, unit)
+    if unit not in ("text", "date") and not parse_ok:
+        audit["rejected"].append({
+            "value": raw_value, "cell": cell, "sheet": sheet, "role": role,
+            "reason": f"could not parse '{raw_value}' as a number for unit={unit}",
+        })
         return None
 
     # Gate 2 — forbidden source
     forbidden = metric.get("source_forbidden") or []
     if role and role in forbidden:
         audit["rejected"].append({
-            "value": value, "cell": cell, "sheet": sheet, "role": role,
+            "value": raw_value, "cell": cell, "sheet": sheet, "role": role,
             "reason": f"forbidden source role '{role}' for this metric",
+        })
+        return None
+
+    # Gate 2.5 — PRIMARY-SOURCE ENFORCEMENT.
+    # If the metric declares primary roles, the accepted value must come from
+    # one of them. A value from a non-primary, non-forbidden role (e.g. GPT
+    # pulled NOI off a debt tab) is rejected → proximity fallback. If the
+    # sheet role is unknown (classification gap), we allow it but note it.
+    primary = metric.get("source_primary") or []
+    if primary and role is not None and role not in primary:
+        audit["rejected"].append({
+            "value": raw_value, "cell": cell, "sheet": sheet, "role": role,
+            "reason": f"role '{role}' is not a primary source {primary} for this metric",
         })
         return None
 
@@ -409,14 +499,15 @@ def build_section_record(metric: dict, extraction: dict, sheet_role_map: dict | 
             )
 
     audit["accepted"] = {
-        "value": value, "normalized": normalized, "cell": cell, "sheet": sheet,
-        "role": role, "method": "section_reader", "reason": reasoning,
+        "raw": raw_value, "value": value, "normalized": normalized,
+        "cell": cell, "sheet": sheet, "role": role,
+        "method": "section_reader", "reason": reasoning,
     }
 
     return {
         "metric_id":            metric["metric_id"],
         "metric_name":          metric["metric_name"],
-        "raw_value":            value,
+        "raw_value":            raw_value,
         "normalized_value":     normalized,
         "display_value":        _format_display(normalized, unit, scale),
         "unit":                 unit,

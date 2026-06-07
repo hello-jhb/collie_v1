@@ -103,7 +103,7 @@ def deep_dive_capital_structure() -> dict[str, Any]:
     bounded = uw.get("bounded_metrics", {}) or {}
     relevant = [
         "Purchase Price", "Total Project Cost", "Debt Amount", "Equity Invested",
-        "Original LTV", "Interest Rate", "Interest Rate Spread", "Interest Rate Cap",
+        "Original LTV", "Loan-to-Cost (LTC)", "Interest Rate", "Interest Rate Spread", "Interest Rate Cap",
         "Loan Maturity", "Interest-Only Period Remaining",
         "DSCR / Debt Coverage Ratio", "Debt Yield",
     ]

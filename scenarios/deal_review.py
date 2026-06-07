@@ -113,7 +113,11 @@ Each line format:
   Exit Date            ← Exit Date
   Exit Price           ← Exit Value / Terminal Value
   Hold Period          ← Hold Period
-  LTV                  ← Original LTV
+  Leverage             ← Original LTV if present, ELSE Loan-to-Cost (LTC).
+                         Label it "LTV: X%" or "LTC: X%" accordingly. Dev /
+                         value-add deals are financed on cost (LTC); stabilized
+                         acquisitions use LTV. Show whichever the model has; if
+                         both, show both.
   Interest Rate        ← Interest Rate (see floating-rate rule below)
   Unlevered IRR        ← Unlevered IRR
   Levered IRR          ← Levered IRR

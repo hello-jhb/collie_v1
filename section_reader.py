@@ -48,8 +48,11 @@ SECTION_READER_VERSION = "v1"
 # stronger model earns its cost. One call per section keeps the prompt focused.
 SECTION_MODEL = "gpt-4o"
 
-_MAX_ROWS = 120
-_MAX_COLS = 16
+# Rendering caps. Cash-flow / returns / exit tables can span 10-12 years of
+# columns plus stabilized/exit, so the column cap must be generous or the
+# right period column gets truncated (this caused returns 0/3 on a test file).
+_MAX_ROWS = 140
+_MAX_COLS = 40
 
 # Human-review order. The orchestrator extracts sections in this sequence.
 SECTION_ORDER = ["property", "deal_basis", "leverage", "returns", "capex"]

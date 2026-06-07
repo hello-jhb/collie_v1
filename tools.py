@@ -414,12 +414,23 @@ def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, boo
             for m in bounded:
                 by_section.setdefault(m.get("section") or "other", []).append(m)
 
-            for sec in SECTION_ORDER:
-                sec_metrics = by_section.get(sec, [])
-                if sec_metrics:
-                    section_results.update(
-                        read_section(sec, sec_metrics, file_path, nominated)
-                    )
+            # Run the section reads CONCURRENTLY — each is an independent,
+            # I/O-bound GPT call. 5 sections in parallel cuts wall-clock from
+            # ~sum to ~max of the individual reads (~100s → ~30s).
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            jobs = {sec: by_section.get(sec, []) for sec in SECTION_ORDER}
+            jobs = {sec: ms for sec, ms in jobs.items() if ms}
+            with ThreadPoolExecutor(max_workers=len(jobs) or 1) as ex:
+                futures = {
+                    ex.submit(read_section, sec, ms, file_path, nominated): sec
+                    for sec, ms in jobs.items()
+                }
+                for fut in as_completed(futures):
+                    sec = futures[fut]
+                    try:
+                        section_results.update(fut.result())
+                    except Exception as e:
+                        _log.error("Section %s read crashed: %s", sec, e)
         except Exception as e:
             _log.error("Section reader failed for %s: %s", file_path.name, e)
             section_results = {}

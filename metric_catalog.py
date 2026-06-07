@@ -9,7 +9,7 @@ REPOSITORY_DIR = Path("repository")
 # Catalog version — bump whenever the schema or alias lists change in a way
 # that should invalidate cached extraction results. Used as part of the
 # versioned cache key.
-CATALOG_VERSION = "phase3.v2"  # added Debt Amount + Equity Invested to bounded list
+CATALOG_VERSION = "phase3.v3"  # added Debt Amount + Equity Invested to bounded list
 
 
 # -----------------------------

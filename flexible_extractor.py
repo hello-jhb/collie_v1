@@ -622,20 +622,19 @@ def scan_workbook_for_all_metrics(file_path, catalog):
 EXTRACTOR_VERSION = "phase1_5a.v1"
 
 
-def scan_workbook_for_candidates(file_path, catalog):
+def scan_workbook_for_candidates(file_path, catalog, sheet_tier_map: dict | None = None):
     """
     Find ALL candidate matches per metric across the workbook.
 
-    Returns {metric_id: [list of candidate dicts]}, where each candidate is:
-        {
-          metric_id, metric_name, category,
-          value, source_file, sheet, sheet_tier,
-          label_cell, value_cell,
-          matched_alias, confidence, label_ratio, match_method,
-        }
+    sheet_tier_map (Phase 2.5): optional {sheet_name: effective_tier} produced by
+    content-based GPT classification. When provided, it OVERRIDES the name-based
+    tier — rescuing mis-named sheets (a cash-flow proforma named "Tab3") and
+    correctly skipping content-identified comps/sensitivity sheets. Sheets mapped
+    to tier 99 are skipped; others are scanned in ascending tier order.
 
-    Candidates are sorted by (sheet_tier, confidence, label_ratio) so the
-    caller can take the top one if they don't need richer ranking.
+    Returns {metric_id: [list of candidate dicts]}, each candidate:
+        {metric_id, metric_name, category, value, source_file, sheet, sheet_tier,
+         label_cell, value_cell, matched_alias, confidence, label_ratio, match_method}
     """
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
@@ -652,10 +651,19 @@ def scan_workbook_for_candidates(file_path, catalog):
     candidates_by_metric: dict = {m["metric_id"]: [] for m in catalog}
     file_name = Path(file_path).name
 
-    candidate_sheets = sorted_sheets_by_priority(wb.sheetnames, exclude_skipped=True)
+    def _tier_for(name: str) -> int:
+        if sheet_tier_map and name in sheet_tier_map:
+            return sheet_tier_map[name]
+        return sheet_priority_tier(name)
+
+    # Build candidate sheet list using effective tiers (skip tier-99), tier-ordered
+    candidate_sheets = sorted(
+        [s for s in wb.sheetnames if _tier_for(s) != 99],
+        key=_tier_for,
+    )
 
     for sheet_name in candidate_sheets:
-        sheet_tier = sheet_priority_tier(sheet_name)
+        sheet_tier = _tier_for(sheet_name)
         ws = wb[sheet_name]
 
         for row in ws.iter_rows(

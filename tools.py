@@ -368,7 +368,36 @@ def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, boo
         file_path.name, cache_key[:12], len(bounded),
     )
 
-    candidates_by_metric = scan_workbook_for_candidates(file_path, bounded)
+    # Phase 2.5 — content-based sheet classification. Builds an effective-tier
+    # map that overrides name-based tiers (rescues mis-named sheets, correctly
+    # skips content-identified comps/sensitivity). Silently {} without API key.
+    sheet_tier_map: dict[str, int] | None = None
+    if llm_available():
+        try:
+            from sheet_classifier import classify_sheets, effective_tier
+            from flexible_extractor import sheet_priority_tier
+            classification = classify_sheets(file_path)
+            if classification:
+                import openpyxl as _opx
+                _wb = _opx.load_workbook(file_path, data_only=True, read_only=True)
+                sheet_tier_map = {
+                    name: effective_tier(name, sheet_priority_tier(name), classification)
+                    for name in _wb.sheetnames
+                }
+                _wb.close()
+                overrides = sum(
+                    1 for n in sheet_tier_map
+                    if sheet_tier_map[n] != sheet_priority_tier(n)
+                )
+                _log.info(
+                    "SHEET-CLASSIFY for %s — %d sheets classified, %d tier overrides",
+                    file_path.name, len(classification), overrides,
+                )
+        except Exception as e:
+            _log.error("Sheet classification failed for %s: %s", file_path.name, e)
+            sheet_tier_map = None
+
+    candidates_by_metric = scan_workbook_for_candidates(file_path, bounded, sheet_tier_map)
 
     # Compute available sheets once for fallback (Phase 1.5b)
     import openpyxl
@@ -656,6 +685,29 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     # --- Reconciliation: backfill / derive bounded metrics using Pass 2 + dates ---
     if bounded_metrics:
         _reconcile_bounded_metrics(bounded_metrics, raw_insights)
+
+    # --- Phase 2.5 / C: comprehension verification over the fully reconciled set.
+    # Holistic "does this deal cohere?" review — catches cross-metric
+    # inconsistencies the deterministic identity checks miss. Flags (not silent
+    # edits): downgrades clearly-contradicted metrics to suspicious + notes.
+    if bounded_metrics and llm_available():
+        try:
+            from metric_resolver_gpt import run_comprehension_review
+            review = run_comprehension_review(bounded_metrics)
+            for flag in review.get("flags", []):
+                mname = flag.get("metric")
+                rec = bounded_metrics.get(mname)
+                if not rec:
+                    continue
+                rec["validation_notes"] = (rec.get("validation_notes") or []) + [
+                    f"Comprehension review ({flag.get('severity','?')}): {flag.get('issue','')}"
+                ]
+                if flag.get("severity") == "high" and rec.get("status") in ("verified", "inferred", "candidate_pool"):
+                    rec["status"] = "suspicious"
+            if review.get("overall"):
+                _log.info("COMPREHENSION %s — %s", filename, review["overall"][:120])
+        except Exception as e:
+            _log.error("Comprehension review failed for %s: %s", filename, e)
 
     # Write both passes + bounded metrics to SSOT (sheet inventory included so
     # the agent can see which sheets exist but were intentionally not bulk-extracted)

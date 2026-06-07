@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 
-RESOLVER_VERSION = "phase2.v2"  # GPT picker prompt + candidate context upgraded
+RESOLVER_VERSION = "phase2_5.v1"  # comprehension layer: knowledge module + sheet classification
 
 
 # ---------------------------------------------------------------------------
@@ -312,5 +312,19 @@ def make_cache_key(
         extractor_version = ev
     if resolver_version is None:
         resolver_version = RESOLVER_VERSION
-    composite = f"{file_hash}|{catalog_version}|{extractor_version}|{resolver_version}"
+    # Knowledge layer + sheet classifier are part of how extraction reasons,
+    # so their versions belong in the cache key — editing RE knowledge or the
+    # classifier invalidates stale cached extractions automatically.
+    try:
+        from re_knowledge import KNOWLEDGE_VERSION
+    except Exception:
+        KNOWLEDGE_VERSION = "na"
+    try:
+        from sheet_classifier import CLASSIFIER_VERSION
+    except Exception:
+        CLASSIFIER_VERSION = "na"
+    composite = (
+        f"{file_hash}|{catalog_version}|{extractor_version}|{resolver_version}"
+        f"|{KNOWLEDGE_VERSION}|{CLASSIFIER_VERSION}"
+    )
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()

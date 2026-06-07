@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from scenarios._llm import client, MODEL_FAST, llm_available
+from re_knowledge import knowledge_block, IDENTITY_RELATIONSHIPS
 
 log = logging.getLogger("fb.resolver_gpt")
 if not log.handlers:
@@ -154,30 +155,7 @@ SYSTEM_PROMPT = """\
 You are an experienced real estate underwriting analyst choosing the deal-level
 value for a specific metric from a list of candidate cells in an Excel model.
 
-PERIOD GLOSSARY (critical — period mismatch is the #1 source of wrong picks):
-  at_close   = value at the time of acquisition / first day of ownership
-               (e.g., "100% Purchase Price", "Going-In LTV", "Closing Equity")
-  year_1     = first projection year, also called "Going-In" or "T-12"
-               (e.g., "Going-In NOI", "Year 1 NOI", "NOI to Determine Going-In Cap Rate")
-               NOT the same as stabilized.
-  stabilized = post-business-plan / post-lease-up steady state
-               (e.g., "Stabilized NOI", "Stabilized Yield", "Stabilized Cap Rate")
-  exit       = at disposition / sale period
-               (e.g., "Exit NOI", "Sale Price", "Terminal Cap Rate", "Year of Sale")
-  n/a        = period doesn't apply (counts, ratios that span the deal, etc.)
-
-INDUSTRY CONVENTIONS (assume these unless overridden by metric definition):
-  - Numeric values labeled "100%", "Total", "Aggregate", "All-in", "Combined",
-    "Consolidated" = deal-level. Prefer over "per Unit", "per Key", "per SF",
-    "per Property", or sub-property breakdowns.
-  - Floating-rate debt has separate Spread, Index, and Cap. "Interest Rate"
-    means the all-in rate (Spread + Index) UNLESS a separate "Interest Rate
-    Spread" candidate also exists, in which case Interest Rate may refer to
-    the spread component only — check context.
-  - CapEx / Total Project Cost should pick the GRAND TOTAL row, not a
-    sub-category (hard costs only, soft costs only, contingency, etc.).
-  - "Going-In NOI" and "Net Operating Income" without a period modifier
-    typically mean Year 1 NOI. Distinguish from "Stabilized NOI" and "Exit NOI".
+""" + knowledge_block(include=["period", "deal_level", "debt"]) + """
 
 ANTI-PATTERNS (reject these unless explicitly requested):
   - Per-unit / per-key / per-SF / per-property cells when total wanted
@@ -486,3 +464,95 @@ def resolve_pool_with_gpt(record: dict, metric: dict, file_path: Path) -> dict:
         chosen.get("value_cell"), metric["metric_name"], reasoning[:80],
     )
     return record
+
+
+# =============================================================================
+# Comprehension verification — Phase 2.5 / C
+# =============================================================================
+#
+# After extraction + reconciliation, send the full set of extracted values to
+# GPT for a holistic "does this deal cohere?" review. This catches errors the
+# deterministic identity checks miss — e.g. an exit value that's implausible
+# given the NOI and cap rate, a unit count inconsistent with the price/unit, a
+# property type that contradicts the metrics.
+#
+# Unlike the per-metric picker, this reasons over the WHOLE deal at once. It
+# does not silently change values — it FLAGS them, appending to validation_notes
+# and (for clear contradictions) downgrading verified→suspicious. The human and
+# the memo then see the flag rather than a confident-wrong number.
+
+COMPREHENSION_SYSTEM = f"""\
+You are a senior real estate analyst doing a sanity review of an automated
+extraction. You are given the metrics pulled from one underwriting model.
+Your job: decide whether the numbers COHERE as a single real deal.
+
+{IDENTITY_RELATIONSHIPS}
+
+Flag a metric ONLY when it is clearly inconsistent with the others or
+implausible for the asset (wrong by an order of magnitude, fails an identity
+by a wide margin, contradicts the property type, etc.). Do NOT flag values
+that are merely missing, nor nitpick small rounding differences.
+
+Return ONLY JSON:
+{{
+  "flags": [
+    {{"metric": "<exact metric name>",
+      "issue": "one sentence — what's inconsistent and with what",
+      "severity": "high" | "medium"}}
+  ],
+  "overall": "one sentence — does the deal cohere as extracted?"
+}}
+No prose, no code fences. If everything coheres, return "flags": [].
+"""
+
+
+def run_comprehension_review(bounded_metrics: dict) -> dict:
+    """
+    Holistic GPT coherence review over all extracted bounded metrics.
+
+    Returns {"flags": [...], "overall": str}. Empty flags = coheres / skipped.
+    Mutates nothing — the caller decides how to apply flags.
+    """
+    if not llm_available() or not bounded_metrics:
+        return {"flags": [], "overall": ""}
+
+    # Build a compact value table for GPT (only metrics that have a value)
+    lines = []
+    for name, rec in bounded_metrics.items():
+        status = rec.get("status")
+        if status in ("missing",):
+            continue
+        val = rec.get("display_value", "—")
+        lines.append(f"  {name}: {val}  [{status}]")
+    if not lines:
+        return {"flags": [], "overall": ""}
+
+    user_msg = "Extracted metrics for one deal:\n\n" + "\n".join(lines)
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_FAST,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": COMPREHENSION_SYSTEM},
+                {"role": "user",   "content": user_msg},
+            ],
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        parsed = json.loads(raw)
+        flags = parsed.get("flags", []) or []
+        log.info(
+            "Comprehension review — %d flag(s). Overall: %s",
+            len(flags), str(parsed.get("overall", ""))[:100],
+        )
+        return parsed
+    except json.JSONDecodeError as e:
+        log.error("Comprehension review JSON parse failed: %s", e)
+        return {"flags": [], "overall": ""}
+    except Exception as e:
+        log.error("Comprehension review API failed: %s", e)
+        return {"flags": [], "overall": ""}

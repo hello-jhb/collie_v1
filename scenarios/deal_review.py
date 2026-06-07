@@ -119,6 +119,12 @@ Each line format:
   Levered IRR          ← Levered IRR
   Exit Cap Rate        ← Exit Cap Rate
 
+CONFLICT RULE:
+If a metric's status is "conflict" (two authoritative sources disagree), show
+both with a ⚠ flag:
+  `**<Label>**: ⚠ CONFLICT — $X (Sheet1!Cell1) vs $Y (Sheet2!Cell2)`
+Never silently pick one.
+
 FLOATING-RATE INTEREST DISPLAY RULE:
 If Interest Rate Spread AND Interest Rate Cap are both populated, the debt is
 FLOATING. Display Interest Rate as:
@@ -214,11 +220,15 @@ def _format_bounded_metrics(bounded: dict) -> str:
         return "(No bounded-metric extraction available — Phase 1 pipeline did not run.)"
 
     # Group by status
-    verified, pool, suspicious, missing = [], [], [], []
+    verified, inferred, conflict, pool, suspicious, missing = [], [], [], [], [], []
     for name, rec in bounded.items():
         status = rec.get("status")
         if status == "verified":
             verified.append((name, rec))
+        elif status == "inferred":
+            inferred.append((name, rec))
+        elif status == "conflict":
+            conflict.append((name, rec))
         elif status == "candidate_pool":
             pool.append((name, rec))
         elif status == "suspicious":
@@ -237,9 +247,24 @@ def _format_bounded_metrics(bounded: dict) -> str:
 
     lines = []
     if verified:
-        lines.append("VERIFIED (single high-confidence candidate; safe to cite):")
+        lines.append("VERIFIED (authoritative source, validated; safe to cite):")
         for name, rec in verified:
             lines.append(_fmt_record(name, rec))
+        lines.append("")
+    if inferred:
+        lines.append("INFERRED (derived or GPT-inferred from verified context; cite, note as inferred):")
+        for name, rec in inferred:
+            lines.append(_fmt_record(name, rec))
+        lines.append("")
+    if conflict:
+        lines.append("CONFLICT (authoritative sources DISAGREE — show both with ⚠, never pick one):")
+        for name, rec in conflict:
+            primary = _fmt_record(name, rec)
+            confs = (rec.get("audit", {}) or {}).get("conflicts", [])
+            alt_str = "; ".join(
+                f"{c.get('sheet')}!{c.get('cell')}={c.get('value')}" for c in confs
+            )
+            lines.append(f"{primary}  ⚠ vs {alt_str}")
         lines.append("")
     if pool:
         lines.append("CANDIDATE POOL (multiple candidates passed schema; "

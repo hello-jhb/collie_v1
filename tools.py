@@ -33,7 +33,7 @@ from flexible_extractor import (
     EXTRACTOR_VERSION,
 )
 from metric_catalog import CATALOG_VERSION
-from metric_resolver import resolve_metric, make_cache_key, RESOLVER_VERSION
+from metric_resolver import resolve_metric, make_cache_key, RESOLVER_VERSION, build_section_record
 from metric_fallback import fallback_find_metric, FALLBACK_VERSION
 from metric_resolver_gpt import (
     resolve_pool_with_gpt,
@@ -368,15 +368,16 @@ def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, boo
         file_path.name, cache_key[:12], len(bounded),
     )
 
-    # Phase 2.5 — content-based sheet classification. Builds an effective-tier
-    # map that overrides name-based tiers (rescues mis-named sheets, correctly
-    # skips content-identified comps/sensitivity). Silently {} without API key.
+    # Phase 2.5 — content-based sheet classification. Gives both a tier map
+    # (for proximity fallback) AND the raw classification (for authoritative-tab
+    # nomination + forbidden-source role lookup). Silently {} without API key.
+    classification: dict[str, dict] = {}
     sheet_tier_map: dict[str, int] | None = None
     if llm_available():
         try:
             from sheet_classifier import classify_sheets, effective_tier
             from flexible_extractor import sheet_priority_tier
-            classification = classify_sheets(file_path)
+            classification = classify_sheets(file_path) or {}
             if classification:
                 import openpyxl as _opx
                 _wb = _opx.load_workbook(file_path, data_only=True, read_only=True)
@@ -395,11 +396,37 @@ def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, boo
                 )
         except Exception as e:
             _log.error("Sheet classification failed for %s: %s", file_path.name, e)
-            sheet_tier_map = None
+            classification, sheet_tier_map = {}, None
 
+    # === PRIMARY PATH — authoritative section reader (Phase 3) ================
+    # For each section (human-review order), read the authoritative tabs as
+    # structured tables and extract that section's checklist. Catalog defines
+    # the objective; GPT navigates structure; validation happens per-record.
+    section_results: dict[str, dict] = {}   # metric_name -> extraction dict
+    if classification and llm_available():
+        try:
+            from section_reader import read_section, SECTION_ORDER
+            from sheet_classifier import nominate_authoritative_tabs
+            nominated = nominate_authoritative_tabs(classification)
+
+            # group bounded metrics by section
+            by_section: dict[str, list[dict]] = {}
+            for m in bounded:
+                by_section.setdefault(m.get("section") or "other", []).append(m)
+
+            for sec in SECTION_ORDER:
+                sec_metrics = by_section.get(sec, [])
+                if sec_metrics:
+                    section_results.update(
+                        read_section(sec, sec_metrics, file_path, nominated)
+                    )
+        except Exception as e:
+            _log.error("Section reader failed for %s: %s", file_path.name, e)
+            section_results = {}
+
+    # === FALLBACK PATH — proximity candidates (only used where section fails) =
     candidates_by_metric = scan_workbook_for_candidates(file_path, bounded, sheet_tier_map)
 
-    # Compute available sheets once for fallback (Phase 1.5b)
     import openpyxl
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
@@ -408,43 +435,54 @@ def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, boo
     except Exception:
         available_sheets = []
 
+    # === Build one record per metric: section reader first, proximity fallback =
     bounded_metrics: dict[str, Any] = {}
+    section_hits = 0
     fallback_uses = 0
-    metrics_by_name: dict[str, dict] = {m["metric_name"]: m for m in bounded}
     for metric in bounded:
-        cands = candidates_by_metric.get(metric["metric_id"], [])
-        record = resolve_metric(metric, cands)
+        record = None
 
-        # Phase 1.5b — GPT-as-reader fallback for zero-candidate cases.
-        if (
-            record["status"] == "missing"
-            and llm_available()
-            and metric.get("preferred_sheets")
-        ):
-            fallback_cand = fallback_find_metric(metric, file_path, available_sheets)
-            if fallback_cand:
-                fallback_uses += 1
-                record = resolve_metric(metric, [fallback_cand])
-                record.setdefault("validation_notes", []).insert(
-                    0,
-                    f"Found via GPT fallback (catalog had 0 candidates). "
-                    f"Reasoning: {fallback_cand.get('fallback_reasoning', '')[:140]}",
-                )
+        # 1) Authoritative section read (validated: forbidden-source + range)
+        extraction = section_results.get(metric["metric_name"])
+        if extraction:
+            record = build_section_record(metric, extraction, classification)
+            if record is not None:
+                section_hits += 1
 
-        # Phase 2 — GPT resolver disambiguates candidate_pool with cell context.
-        # Skips internally if all candidates substantially agree.
-        if record["status"] == "candidate_pool" and llm_available():
-            record = resolve_pool_with_gpt(record, metric, file_path)
+        # 2) Proximity fallback (only if section read missing or rejected)
+        if record is None:
+            cands = candidates_by_metric.get(metric["metric_id"], [])
+            record = resolve_metric(metric, cands)
 
-        # Trim candidate list to keep cache size sane — keep top 5 only
-        record["candidates"] = record["candidates"][:5]
+            # Phase 1.5b — GPT-as-reader fallback for zero-candidate cases.
+            if (
+                record["status"] == "missing"
+                and llm_available()
+                and metric.get("preferred_sheets")
+            ):
+                fallback_cand = fallback_find_metric(metric, file_path, available_sheets)
+                if fallback_cand:
+                    fallback_uses += 1
+                    record = resolve_metric(metric, [fallback_cand])
+                    record.setdefault("validation_notes", []).insert(
+                        0,
+                        f"Found via GPT fallback (catalog had 0 candidates). "
+                        f"Reasoning: {fallback_cand.get('fallback_reasoning', '')[:140]}",
+                    )
+
+            # Phase 2 — GPT resolver disambiguates candidate_pool with cell context.
+            if record["status"] == "candidate_pool" and llm_available():
+                record = resolve_pool_with_gpt(record, metric, file_path)
+
+        record["candidates"] = record.get("candidates", [])[:5]
         bounded_metrics[metric["metric_name"]] = record
 
-    if fallback_uses:
-        _log.info(
-            "BOUNDED-METRICS for %s — GPT fallback used %d times",
-            file_path.name, fallback_uses,
-        )
+    _log.info(
+        "BOUNDED-METRICS for %s — %d via section reader, %d via GPT fallback, "
+        "%d via proximity",
+        file_path.name, section_hits, fallback_uses,
+        len(bounded) - section_hits - fallback_uses,
+    )
 
     # Phase 2 — identity arithmetic cross-checks (deterministic).
     # Flags inconsistencies on the implicated metric's validation_notes

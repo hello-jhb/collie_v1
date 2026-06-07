@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 
-RESOLVER_VERSION = "phase2_5.v1"  # comprehension layer: knowledge module + sheet classification
+RESOLVER_VERSION = "phase3.v1"  # authority-first section reader is primary path
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +289,148 @@ def _make_record(
         "status":            status,
         "validation_notes":  notes,
         "candidates":        candidates,  # full list, for audit / Phase 2 resolver
+        "audit":             {
+            "accepted": (
+                {"value": candidate["value"], "cell": candidate.get("value_cell"),
+                 "sheet": candidate.get("sheet"), "method": "proximity_fallback"}
+                if candidate else None
+            ),
+            "rejected": [],
+            "conflicts": [],
+        },
         "in_bounded_list":   metric.get("in_bounded_list", False),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — validation of a section-reader extraction (authority-first path)
+# ---------------------------------------------------------------------------
+
+def _role_of_sheet(sheet_name, sheet_role_map) -> str | None:
+    if not sheet_name or not sheet_role_map:
+        return None
+    info = sheet_role_map.get(sheet_name)
+    if isinstance(info, dict):
+        return info.get("role")
+    if isinstance(info, str):
+        return info
+    return None
+
+
+def _values_disagree(a, b, tol: float = 0.02) -> bool:
+    """True if two values differ beyond tolerance (2% for numbers; exact for text)."""
+    try:
+        fa, fb = float(a), float(b)
+        if fa == fb:
+            return False
+        denom = max(abs(fa), abs(fb), 1e-9)
+        return abs(fa - fb) / denom > tol
+    except (TypeError, ValueError):
+        return str(a).strip().lower() != str(b).strip().lower()
+
+
+def build_section_record(metric: dict, extraction: dict, sheet_role_map: dict | None) -> dict | None:
+    """
+    Build a verified SSOT record from a Section Reader extraction, OR return None
+    to signal the value was rejected (caller then tries the proximity fallback).
+
+    extraction shape (from section_reader.read_section):
+        {found, value, cell, sheet, column_header, reasoning, alt?}
+
+    Validation gates (any failure → reject → None):
+      1. found must be true with a value
+      2. forbidden-source: the value's sheet role must not be in source_forbidden
+      3. range/unit: value within schema bounds (auto-scale ×1000/×1M if needed)
+
+    Conflict (status="conflict"): an 'alt' value from another authoritative tab
+    that disagrees beyond tolerance.
+
+    Every record carries an `audit` block:
+        {accepted: {...}, rejected: [...], conflicts: [...]}
+    """
+    unit  = metric.get("unit")
+    scale = metric.get("scale")
+    period = metric.get("period")
+    audit: dict = {"accepted": None, "rejected": [], "conflicts": []}
+
+    if not extraction or not extraction.get("found"):
+        return None
+
+    value = extraction.get("value")
+    sheet = extraction.get("sheet")
+    cell  = extraction.get("cell")
+    role  = _role_of_sheet(sheet, sheet_role_map)
+    reasoning = extraction.get("reasoning", "")
+
+    if value in (None, "", "—"):
+        return None
+
+    # Gate 2 — forbidden source
+    forbidden = metric.get("source_forbidden") or []
+    if role and role in forbidden:
+        audit["rejected"].append({
+            "value": value, "cell": cell, "sheet": sheet, "role": role,
+            "reason": f"forbidden source role '{role}' for this metric",
+        })
+        return None
+
+    # Gate 3 — range / unit (with auto-scale). Text/date short-circuit inside.
+    passes, scale_correction = _validate_against_range(value, metric)
+    if not passes:
+        audit["rejected"].append({
+            "value": value, "cell": cell, "sheet": sheet, "role": role,
+            "reason": f"out of range [{metric.get('range_min')}, {metric.get('range_max')}]",
+        })
+        return None
+
+    if scale_correction == "1000":
+        normalized = float(value) * 1000
+    elif scale_correction == "1000000":
+        normalized = float(value) * 1_000_000
+    else:
+        normalized = value
+
+    notes: list[str] = [f"Section reader: {reasoning}"] if reasoning else []
+    if scale_correction:
+        notes.append(f"auto-scaled by {scale_correction}")
+
+    # Conflict detection via alt
+    status = "verified"
+    alt = extraction.get("alt")
+    if isinstance(alt, dict) and alt.get("value") not in (None, "", "—"):
+        if _values_disagree(value, alt["value"]):
+            status = "conflict"
+            audit["conflicts"].append({
+                "value": alt.get("value"), "cell": alt.get("cell"), "sheet": alt.get("sheet"),
+            })
+            notes.append(
+                f"CONFLICT: authoritative sources disagree — "
+                f"{sheet}!{cell}={value} vs {alt.get('sheet')}!{alt.get('cell')}={alt.get('value')}"
+            )
+
+    audit["accepted"] = {
+        "value": value, "normalized": normalized, "cell": cell, "sheet": sheet,
+        "role": role, "method": "section_reader", "reason": reasoning,
+    }
+
+    return {
+        "metric_id":            metric["metric_id"],
+        "metric_name":          metric["metric_name"],
+        "raw_value":            value,
+        "normalized_value":     normalized,
+        "display_value":        _format_display(normalized, unit, scale),
+        "unit":                 unit,
+        "scale":                scale,
+        "period":               period,
+        "source_sheet":         sheet,
+        "source_cell":          cell,
+        "sheet_tier":           None,
+        "extractor_confidence": "section_reader",
+        "status":               status,
+        "validation_notes":     notes,
+        "candidates":           [],
+        "audit":                audit,
+        "in_bounded_list":      metric.get("in_bounded_list", False),
     }
 
 
@@ -323,8 +464,12 @@ def make_cache_key(
         from sheet_classifier import CLASSIFIER_VERSION
     except Exception:
         CLASSIFIER_VERSION = "na"
+    try:
+        from section_reader import SECTION_READER_VERSION
+    except Exception:
+        SECTION_READER_VERSION = "na"
     composite = (
         f"{file_hash}|{catalog_version}|{extractor_version}|{resolver_version}"
-        f"|{KNOWLEDGE_VERSION}|{CLASSIFIER_VERSION}"
+        f"|{KNOWLEDGE_VERSION}|{CLASSIFIER_VERSION}|{SECTION_READER_VERSION}"
     )
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()

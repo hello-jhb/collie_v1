@@ -348,6 +348,29 @@ def find_nearby_value(ws, row, col, metric_name: str = "", metric_unit: str | No
                 return v, cell_address(row + offset, col), "below"
         return None, None, None
 
+    # Text metrics (Asset Name, Location, etc.): find the adjacent TEXT value,
+    # not a numeric one. The value is typically the first non-empty text cell
+    # to the right of the label. We skip cells that look like another label
+    # (i.e. cells that themselves are immediately followed by their own value).
+    if metric_unit == "text":
+        for offset in range(1, 8):
+            v = ws.cell(row=row, column=col + offset).value
+            if isinstance(v, str) and v.strip() and len(v.strip()) >= 2:
+                # Reject pure-numeric-looking strings (zip codes, codes)
+                stripped = v.strip().replace(",", "").replace(".", "").replace("-", "")
+                if stripped.isdigit():
+                    continue
+                return v.strip(), cell_address(row, col + offset), "right"
+        # Then try below
+        for offset in range(1, 4):
+            v = ws.cell(row=row + offset, column=col).value
+            if isinstance(v, str) and v.strip() and len(v.strip()) >= 2:
+                stripped = v.strip().replace(",", "").replace(".", "").replace("-", "")
+                if stripped.isdigit():
+                    continue
+                return v.strip(), cell_address(row + offset, col), "below"
+        return None, None, None
+
     data_cols = _scan_data_columns(ws, row, col)
 
     # Table-aware path: 2+ columns of data → likely a table

@@ -92,28 +92,32 @@ EXACTLY 2 sentences, bullet style. No paragraphs.
   of vacant inventory to drive ~$2.5M NOI uplift."
 
 ## Data Appendix
-Render this exact list in this exact order. Each line:
-`**Metric**: <display value> (<sheet>!<cell>)` if verified or candidate_pool.
-For suspicious: `**Metric**: SUSPICIOUS — <reason>`.
-For missing: `**Metric**: —`.
+Render exactly these rows in this exact order. Use the DISPLAY LABEL on the
+left (left of the arrow) as the line label — never write the word "Metric".
+Pull the value from the bounded metric named on the right of the arrow.
 
-  1.  Property Name (Asset Name)
-  2.  Number of Properties
-  3.  Property Type
-  4.  Location
-  5.  Total SF
-  6.  Total Units
-  7.  Purchase Date
-  8.  Purchase Price
-  9.  Total Project Cost
-  10. Exit Date
-  11. Exit Value / Terminal Value
-  12. Hold Period
-  13. Original LTV
-  14. Interest Rate (see floating-rate rule below)
-  15. Unlevered IRR
-  16. Levered IRR
-  17. Exit Cap Rate
+Each line format:
+  `**<Display Label>**: <display value> (<sheet>!<cell>)`   if verified/inferred/candidate_pool
+  `**<Display Label>**: — (data quality issue)`             if suspicious
+  `**<Display Label>**: —`                                  if missing
+
+  Property Name        ← Asset Name
+  Number of Properties ← Number of Properties
+  Property Type        ← Property Type
+  Location             ← Location
+  Total SF             ← Total SF
+  Total Units          ← Total Units
+  Acquisition Date     ← Purchase Date
+  Purchase Price       ← Purchase Price
+  Total Project Cost   ← Total Project Cost
+  Exit Date            ← Exit Date
+  Exit Price           ← Exit Value / Terminal Value
+  Hold Period          ← Hold Period
+  LTV                  ← Original LTV
+  Interest Rate        ← Interest Rate (see floating-rate rule below)
+  Unlevered IRR        ← Unlevered IRR
+  Levered IRR          ← Levered IRR
+  Exit Cap Rate        ← Exit Cap Rate
 
 FLOATING-RATE INTEREST DISPLAY RULE:
 If Interest Rate Spread AND Interest Rate Cap are both populated, the debt is

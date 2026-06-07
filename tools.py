@@ -461,6 +461,109 @@ def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, boo
     return bounded_metrics, cache_key, False
 
 
+# Map bounded-metric name → (pass2_field, mode).
+#   mode "always":     Pass 2 inference is authoritative; use it whenever present.
+#                      (Property Type can't be cell-extracted — models encode it
+#                       as "Asset Type - Hotel % = 1" breakdown rows, so the
+#                       catalog only ever grabs a label, never the type itself.)
+#   mode "if_bad":     only backfill when the catalog value is missing/suspicious/
+#                      numeric (catalog text extraction is usually fine here).
+_PASS2_BACKFILL_MAP = {
+    "Asset Name":    ("asset_name",    "if_bad"),
+    "Property Type": ("property_type", "always"),
+    "Location":      ("location",      "if_bad"),
+}
+
+
+def _reconcile_bounded_metrics(bounded_metrics: dict, raw_insights: dict | None) -> None:
+    """
+    Post-extraction reconciliation (mutates bounded_metrics in place):
+
+    1. Backfill characterization text metrics (Asset Name, Property Type,
+       Location) from Pass 2 inference when the catalog couldn't find a clean
+       text value. Pass 2 reads full-sheet context and infers e.g. "Hotel"
+       from "Asset Type - Hotel % = 1" — something cell-matching can't do.
+
+    2. Derive Hold Period from Purchase Date + Exit Date when the directly-
+       extracted Hold Period is missing or suspicious. There is exactly one
+       true hold period; if the model didn't label it cleanly we compute it
+       from the two date anchors.
+    """
+    found = (raw_insights or {}).get("found", {}) or {}
+
+    # --- 1. Backfill text characterization metrics from Pass 2 ---
+    for metric_name, (pass2_key, mode) in _PASS2_BACKFILL_MAP.items():
+        rec = bounded_metrics.get(metric_name)
+        if not rec:
+            continue
+        cur_val = rec.get("normalized_value")
+        cur_status = rec.get("status")
+        if mode == "always":
+            should_backfill = True
+        else:  # "if_bad"
+            should_backfill = (
+                cur_status in ("missing", "suspicious")
+                or cur_val is None
+                or isinstance(cur_val, (int, float))   # text metric holding a number = wrong
+                or (isinstance(cur_val, str) and cur_val.strip().replace(".", "").isdigit())
+            )
+        if not should_backfill:
+            continue
+        p2 = found.get(pass2_key)
+        if isinstance(p2, dict) and p2.get("value") not in (None, "", "—"):
+            rec["raw_value"]        = p2["value"]
+            rec["normalized_value"] = p2["value"]
+            rec["display_value"]    = str(p2["value"])
+            rec["source_sheet"]     = p2.get("sheet") or "(GPT inference)"
+            rec["source_cell"]      = p2.get("label_in_file") or "—"
+            rec["status"]           = "inferred"
+            rec.setdefault("validation_notes", []).insert(
+                0, f"Backfilled from Pass 2 characterization (key={pass2_key})."
+            )
+
+    # --- 2. Derive Hold Period from date anchors ---
+    hp = bounded_metrics.get("Hold Period")
+    if hp and hp.get("status") in ("missing", "suspicious"):
+        pd = bounded_metrics.get("Purchase Date")
+        ed = bounded_metrics.get("Exit Date")
+        pdv = pd.get("normalized_value") if pd else None
+        edv = ed.get("normalized_value") if ed else None
+        years = _years_between(pdv, edv)
+        if years is not None and 0.5 <= years <= 20:
+            hp["raw_value"]        = years
+            hp["normalized_value"] = round(years, 1)
+            hp["display_value"]    = f"{years:.1f} years"
+            hp["source_sheet"]     = "(derived)"
+            hp["source_cell"]      = "Exit Date − Purchase Date"
+            hp["status"]           = "inferred"
+            hp.setdefault("validation_notes", []).insert(
+                0,
+                f"Derived from Purchase Date and Exit Date "
+                f"({pdv} → {edv} = {years:.1f} yrs)."
+            )
+
+
+def _years_between(d1, d2):
+    """Return fractional years between two date-like values, or None."""
+    import datetime as _dt
+    def _to_date(d):
+        if isinstance(d, _dt.datetime):
+            return d.date()
+        if isinstance(d, _dt.date):
+            return d
+        if isinstance(d, str):
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    return _dt.datetime.strptime(d[:19], fmt).date()
+                except ValueError:
+                    continue
+        return None
+    a, b = _to_date(d1), _to_date(d2)
+    if a is None or b is None:
+        return None
+    return abs((b - a).days) / 365.25
+
+
 def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     """
     Classify + extract + GPT insight pass + write to SSOT.
@@ -549,6 +652,10 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         )
         t_pass2 = time.time() - t0
         _log.info("INGEST %s — Pass 2 (GPT) done in %.1fs", filename, t_pass2)
+
+    # --- Reconciliation: backfill / derive bounded metrics using Pass 2 + dates ---
+    if bounded_metrics:
+        _reconcile_bounded_metrics(bounded_metrics, raw_insights)
 
     # Write both passes + bounded metrics to SSOT (sheet inventory included so
     # the agent can see which sheets exist but were intentionally not bulk-extracted)

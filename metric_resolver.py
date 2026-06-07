@@ -214,8 +214,17 @@ def resolve_metric(metric: dict, candidates: list[dict]) -> dict:
     else:
         normalized_value = raw_value
 
+    # Preferred-sheet enforcement: if this metric declares preferred_sheets but
+    # the chosen candidate is NOT on any of them (pref_score 999 = no match),
+    # we don't trust the value — the authoritative source wasn't found, so the
+    # value likely came from an unrelated sheet (e.g. Total Project Cost landing
+    # on an F&B-sales cell in an expense-analysis tab). Mark off_preferred so the
+    # downstream GPT fallback gets a chance to read the preferred sheets directly.
+    has_preferred = bool(preferred_sheets)
+    chosen_off_preferred = has_preferred and top["pref_score"] >= 999
+
     # Determine status
-    if top["passes_validation"]:
+    if top["passes_validation"] and not chosen_off_preferred:
         if len(passing) > 1:
             # Multiple candidates passed schema — needs Phase 2 resolver
             status = "candidate_pool"
@@ -226,6 +235,17 @@ def resolve_metric(metric: dict, candidates: list[dict]) -> dict:
             )
         else:
             status = "verified"
+    elif top["passes_validation"] and chosen_off_preferred:
+        # Value passed range check but came from a non-authoritative sheet.
+        # Treat as missing so the GPT fallback re-reads the preferred sheets;
+        # if fallback also fails, it will surface honestly rather than show
+        # a confident wrong number from the wrong tab.
+        status = "missing"
+        notes.append(
+            f"Best candidate is on '{cand.get('sheet')}' which is NOT a preferred "
+            f"source for this metric ({', '.join(preferred_sheets)}). "
+            "Routing to GPT fallback to read the authoritative sheet."
+        )
     else:
         status = "suspicious"
         notes.append("No candidate passed schema validation. Top candidate by rank used; may be wrong.")

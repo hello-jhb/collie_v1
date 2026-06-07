@@ -484,9 +484,9 @@ def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
             return
         st.markdown(result["narrative"])
 
-    # Seed into agent history so the assistant can reference it in follow-up Q&A
-    agent.history.append({"role": "user",      "content": pseudo_user_msg})
-    agent.history.append({"role": "assistant", "content": result["narrative"]})
+    # Seed into agent message history so follow-up Q&A can reference it
+    agent.messages.append({"role": "user",      "content": pseudo_user_msg})
+    agent.messages.append({"role": "assistant", "content": result["narrative"]})
 
 
 def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:

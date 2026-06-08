@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 
-RESOLVER_VERSION = "phase3.v8"  # robust value parsing + primary-source enforcement
+RESOLVER_VERSION = "phase3.v9"  # robust value parsing + primary-source enforcement
 
 
 # ---------------------------------------------------------------------------

@@ -79,16 +79,20 @@ Output format (markdown):
 |---|---|---|
 | Purchase Price | $X (Sheet!Cell) | ... |
 | Total Project Cost | $X | ... |
-| Original Debt | $X | ... |
+| Acquisition Loan | $X | ... |
+| Construction Loan | $X (only if present — conversion/dev) | ... |
 | Equity Required | $X | ... |
-| LTV | X% | ... |
+| LTV or LTC | X% | LTC for cost-financed dev/value-add |
 | Interest Rate | (see floating rule above) | ... |
 | Loan Maturity | X months | ... |
 | I/O Period | X months | ... |
 | DSCR | X.Xx | ... |
 | Debt Yield | X.X% | ... |
 
-Then 1-2 sentences on the capital stack's risk/return profile.
+Omit rows that are missing/N/A rather than showing "—" clutter. If both an
+acquisition loan and a construction loan are present, note that the
+construction loan funds the project and typically repays the acquisition
+bridge. Then 1-2 sentences on the capital stack's risk/return profile.
 Max 200 words total. No filler.
 """
 
@@ -102,7 +106,8 @@ def deep_dive_capital_structure() -> dict[str, Any]:
 
     bounded = uw.get("bounded_metrics", {}) or {}
     relevant = [
-        "Purchase Price", "Total Project Cost", "Debt Amount", "Equity Invested",
+        "Purchase Price", "Total Project Cost", "Debt Amount", "Construction Loan",
+        "Equity Invested",
         "Original LTV", "Loan-to-Cost (LTC)", "Interest Rate", "Interest Rate Spread", "Interest Rate Cap",
         "Loan Maturity", "Interest-Only Period Remaining",
         "DSCR / Debt Coverage Ratio", "Debt Yield",

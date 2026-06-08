@@ -113,6 +113,12 @@ Each line format:
   Exit Date            ← Exit Date
   Exit Price           ← Exit Value / Terminal Value
   Hold Period          ← Hold Period
+  Debt                 ← Debt Amount (acquisition/initial loan). If a
+                         Construction Loan is also present, show BOTH on
+                         separate lines: "Acquisition Loan: $X" and
+                         "Construction Loan: $Y" — conversion/dev deals carry
+                         both tranches (the construction loan funds the project
+                         and repays the bridge).
   Leverage             ← Original LTV if present, ELSE Loan-to-Cost (LTC).
                          Label it "LTV: X%" or "LTC: X%" accordingly. Dev /
                          value-add deals are financed on cost (LTC); stabilized
@@ -121,7 +127,9 @@ Each line format:
   Interest Rate        ← Interest Rate (see floating-rate rule below)
   Unlevered IRR        ← Unlevered IRR
   Levered IRR          ← Levered IRR
-  Exit Cap Rate        ← Exit Cap Rate
+  Exit Cap Rate        ← Exit Cap Rate (if status is "not_applicable", show
+                         "N/A" — dev/conversion deals have no going-in cap and
+                         may express returns differently; never invent it)
 
 CONFLICT RULE:
 If a metric's status is "conflict" (two authoritative sources disagree), show

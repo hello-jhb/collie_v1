@@ -622,7 +622,48 @@ def _reconcile_bounded_metrics(bounded_metrics: dict, raw_insights: dict | None)
                 0, f"Backfilled from Pass 2 characterization (key={pass2_key})."
             )
 
-    # --- 2. Derive Hold Period from date anchors ---
+    # --- 2. Normalize / derive Hold Period and Exit Date ---
+    def _num(v):
+        if v is None:
+            return None
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        if isinstance(v, str):
+            s = v.replace("$", "").replace(",", "").replace("%", "").strip()
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        return None
+
+    def _set_metric(rec, raw, normalized, display, source_sheet, source_cell, status, note):
+        rec["raw_value"] = raw
+        rec["normalized_value"] = normalized
+        rec["display_value"] = display
+        rec["source_sheet"] = source_sheet
+        rec["source_cell"] = source_cell
+        rec["status"] = status
+        rec.setdefault("validation_notes", []).insert(0, note)
+
+    # 2A. Normalize explicit Hold Period if present as months.
+    hp = bounded_metrics.get("Hold Period")
+    if hp:
+        hp_val = _num(hp.get("normalized_value") or hp.get("raw_value"))
+        # If hold period is 60, 84, etc., treat as months and convert to years.
+        if hp_val is not None and hp_val > 24 and hp_val <= 360:
+            years = hp_val / 12.0
+            _set_metric(
+                hp,
+                raw=hp_val,
+                normalized=round(years, 2),
+                display=f"{years:.1f} years",
+                source_sheet=hp.get("source_sheet"),
+                source_cell=hp.get("source_cell"),
+                status="verified" if hp.get("status") != "missing" else "inferred",
+                note=f"Normalized Hold Period from {hp_val:g} months to {years:.1f} years.",
+            )
+
+    # 2B. If Hold Period still missing/suspicious, derive from Purchase Date + Exit Date.
     hp = bounded_metrics.get("Hold Period")
     if hp and hp.get("status") in ("missing", "suspicious"):
         pd = bounded_metrics.get("Purchase Date")
@@ -631,17 +672,61 @@ def _reconcile_bounded_metrics(bounded_metrics: dict, raw_insights: dict | None)
         edv = ed.get("normalized_value") if ed else None
         years = _years_between(pdv, edv)
         if years is not None and 0.5 <= years <= 20:
-            hp["raw_value"]        = years
-            hp["normalized_value"] = round(years, 1)
-            hp["display_value"]    = f"{years:.1f} years"
-            hp["source_sheet"]     = "(derived)"
-            hp["source_cell"]      = "Exit Date − Purchase Date"
-            hp["status"]           = "inferred"
-            hp.setdefault("validation_notes", []).insert(
-                0,
-                f"Derived from Purchase Date and Exit Date "
-                f"({pdv} → {edv} = {years:.1f} yrs)."
+            _set_metric(
+                hp,
+                raw=years,
+                normalized=round(years, 1),
+                display=f"{years:.1f} years",
+                source_sheet="(derived)",
+                source_cell="Exit Date - Purchase Date",
+                status="derived",
+                note=(
+                    f"Derived from Purchase Date and Exit Date "
+                    f"({pdv} -> {edv} = {years:.1f} yrs)."
+                ),
             )
+
+    # 2C. If Exit Date missing, derive from Purchase Date + Hold Period.
+    ed = bounded_metrics.get("Exit Date")
+    pd = bounded_metrics.get("Purchase Date")
+    hp = bounded_metrics.get("Hold Period")
+    if ed and ed.get("status") in ("missing", "suspicious"):
+        pdv = pd.get("normalized_value") if pd else None
+        hp_years = _num(hp.get("normalized_value")) if hp else None
+        if pdv and hp_years is not None and 0.5 <= hp_years <= 20:
+            import datetime as _dt
+            from dateutil.relativedelta import relativedelta
+
+            def _to_date(d):
+                if isinstance(d, _dt.datetime):
+                    return d.date()
+                if isinstance(d, _dt.date):
+                    return d
+                if isinstance(d, str):
+                    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"):
+                        try:
+                            return _dt.datetime.strptime(d[:19], fmt).date()
+                        except ValueError:
+                            pass
+                return None
+
+            purchase_date = _to_date(pdv)
+            if purchase_date:
+                months = int(round(hp_years * 12))
+                exit_date = purchase_date + relativedelta(months=months)
+                _set_metric(
+                    ed,
+                    raw=exit_date.isoformat(),
+                    normalized=exit_date.isoformat(),
+                    display=exit_date.isoformat(),
+                    source_sheet="(derived)",
+                    source_cell="Purchase Date + Hold Period",
+                    status="derived",
+                    note=(
+                        f"Derived Exit Date from Purchase Date "
+                        f"{purchase_date.isoformat()} + {months} months."
+                    ),
+                )
 
     # --- 3. Going-in Cap Rate is N/A for development / conversion deals ---
     # If going-in NOI is ~0 (no operating income at acquisition), a going-in cap
@@ -781,6 +866,17 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     # --- Reconciliation: backfill / derive bounded metrics using Pass 2 + dates ---
     if bounded_metrics:
         _reconcile_bounded_metrics(bounded_metrics, raw_insights)
+        # Final identity checks AFTER reconciliation/backfill/derivations.
+        identity_flags = run_identity_checks(bounded_metrics)
+        for metric_name, reasons in identity_flags.items():
+            rec = bounded_metrics.get(metric_name)
+            if not rec:
+                continue
+            rec["validation_notes"] = (rec.get("validation_notes") or []) + [
+                f"Final identity check flagged this metric: {r}" for r in reasons
+            ]
+            if rec.get("status") == "verified":
+                rec["status"] = "suspicious"
 
     # --- Phase 2.5 / C: comprehension verification over the fully reconciled set.
     # Holistic "does this deal cohere?" review — catches cross-metric

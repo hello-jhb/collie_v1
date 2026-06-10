@@ -237,7 +237,7 @@ def _format_bounded_metrics(bounded: dict) -> str:
         status = rec.get("status")
         if status == "verified":
             verified.append((name, rec))
-        elif status == "inferred":
+        elif status in ("inferred", "derived"):
             inferred.append((name, rec))
         elif status == "conflict":
             conflict.append((name, rec))

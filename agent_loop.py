@@ -125,6 +125,13 @@ Behavior rules:
 - Cite SSOT-sourced numbers with their file/sheet/cell when relevant.
 - For follow-up questions about file content, ALWAYS try the file inspection
   tools (read_sheet, search_file) before saying you can't find something.
+- If the user asks for annual NOI, annual cash flow, annual revenue, or annual
+  expense trajectory, do NOT return monthly row values directly. First inspect
+  the relevant Proforma / Cash Flow / NOI sheet. If the table is monthly, group
+  the monthly columns by year and SUM them into annual totals. Clearly label the
+  result as annualized from monthly data.
+- If you are unsure whether values are monthly or annual, read the column
+  headers before answering.
 """,
     },
     "perf_vs_plan": {

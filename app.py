@@ -302,7 +302,7 @@ def _ssot_panel() -> None:
                             }
                             for sheet, info in content_roles.items()
                         ],
-                        use_container_width=True,
+                        width="stretch",
                     )
                 if authoritative_tabs:
                     st.markdown("**Authoritative Tabs** — section-reader source map")
@@ -314,7 +314,7 @@ def _ssot_panel() -> None:
                 identity_checks = bundle.get("identity_checks") or []
                 if identity_checks:
                     st.markdown("**Identity Checks** — final reconciled values only")
-                    st.dataframe(identity_checks, use_container_width=True)
+                    st.dataframe(identity_checks, width="stretch")
 
                 knowledge_usage = bundle.get("knowledge_usage") or {}
                 if knowledge_usage:
@@ -337,7 +337,7 @@ def _ssot_panel() -> None:
                                 }
                                 for row in extraction_plan
                             ],
-                            use_container_width=True,
+                            width="stretch",
                         )
 
                 bpr = bundle.get("business_plan_read", {})
@@ -352,7 +352,7 @@ def _ssot_panel() -> None:
                         [{"metric": r["metric"], "status": r["status"],
                           "value": r["value"], "source": f"{r.get('source_sheet')}!{r.get('source_cell')}"}
                          for r in issues],
-                        use_container_width=True,
+                        width="stretch",
                     )
                 else:
                     st.caption("None — every bounded metric verified.")
@@ -363,12 +363,31 @@ def _ssot_panel() -> None:
                       "period": r.get("period"), "status": r["status"],
                       "source": f"{r.get('source_sheet')}!{r.get('source_cell')}"}
                      for r in bundle.get("verified_facts", [])],
-                    use_container_width=True,
+                    width="stretch",
                 )
                 source_audit = bundle.get("source_audit") or []
                 if source_audit:
                     with st.expander("Source Audit", expanded=False):
-                        st.json(source_audit)
+                        st.caption(
+                            "Full source audit is saved in the Analyst Bundle JSON. "
+                            "Showing a compact summary here to keep the app responsive."
+                        )
+                        st.dataframe(
+                            [
+                                {
+                                    "metric": row.get("metric"),
+                                    "accepted": (
+                                        f"{(row.get('accepted_source') or {}).get('sheet')}!"
+                                        f"{(row.get('accepted_source') or {}).get('cell')}"
+                                    ),
+                                    "rejected": len(row.get("rejected_candidates") or []),
+                                    "conflicts": len(row.get("conflicts") or []),
+                                    "alternates": len(row.get("alternate_candidates") or []),
+                                }
+                                for row in source_audit
+                            ],
+                            width="stretch",
+                        )
                 if bundle.get("bundle_path"):
                     st.caption(f"Saved: {bundle['bundle_path']}")
     except Exception:
@@ -453,14 +472,14 @@ def render_landing() -> None:
                     key=f"start_{card['key']}",
                     on_click=_activate_scenario,
                     args=(card["key"],),
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 st.button(
                     "Not available yet",
                     key=f"disabled_{card['key']}",
                     disabled=True,
-                    use_container_width=True,
+                    width="stretch",
                 )
 
 
@@ -489,7 +508,7 @@ def render_scenario() -> None:
             unsafe_allow_html=True,
         )
     with right:
-        st.button("← Back to scenarios", on_click=_back_to_landing, use_container_width=True)
+        st.button("← Back to scenarios", on_click=_back_to_landing, width="stretch")
 
     st.divider()
 
@@ -576,7 +595,7 @@ def _render_deep_dive_buttons(agent: AgentSession) -> None:
     ]
     for i, (key, label) in enumerate(button_specs):
         with cols[i]:
-            if st.button(label, key=f"dd_{key}", use_container_width=True):
+            if st.button(label, key=f"dd_{key}", width="stretch"):
                 _run_deep_dive(agent, key, label)
 
 

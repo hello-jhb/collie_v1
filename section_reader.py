@@ -25,14 +25,16 @@ metrics the section reader cannot find.
 from __future__ import annotations
 import json
 import logging
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import openpyxl
 import openpyxl.utils as xlutils
 
-from scenarios._llm import client, llm_available
+from scenarios._llm import MODEL_FAST, client, llm_available
 from re_knowledge import knowledge_block
 
 log = logging.getLogger("fb.section_reader")
@@ -42,11 +44,13 @@ if not log.handlers:
     log.addHandler(h)
     log.setLevel(logging.INFO)
 
-SECTION_READER_VERSION = "v1"
+SECTION_READER_VERSION = "v2"
 
-# gpt-4o for the structured-table read — institutional tables are where the
-# stronger model earns its cost. One call per section keeps the prompt focused.
-SECTION_MODEL = "gpt-4o"
+# Use the fast model by default. The Section Reader can issue several large
+# structured-table calls per workbook; gpt-4o TPM limits were crashing hosted
+# runs when sections were processed in parallel. Override with SECTION_MODEL
+# only when the deployment has enough rate-limit headroom.
+SECTION_MODEL = os.getenv("SECTION_MODEL", MODEL_FAST)
 
 # Rendering caps. Cash-flow / returns / exit tables can span 10-12 years of
 # columns plus stabilized/exit, so the column cap must be generous or the
@@ -56,6 +60,34 @@ _MAX_COLS = 40
 
 # Human-review order. The orchestrator extracts sections in this sequence.
 SECTION_ORDER = ["property", "deal_basis", "leverage", "returns", "capex"]
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "rate_limit" in text or "rate limit" in text or "429" in text
+
+
+def _chat_completion_with_retry(messages: list[dict[str, str]], section: str):
+    delays = [20, 45]
+    last_exc: Exception | None = None
+    for attempt in range(len(delays) + 1):
+        try:
+            return client.chat.completions.create(
+                model=SECTION_MODEL,
+                temperature=0.0,
+                messages=messages,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if not _is_rate_limit_error(exc) or attempt >= len(delays):
+                raise
+            delay = delays[attempt]
+            log.warning(
+                "Section %s hit rate limit on %s; retrying in %ss",
+                section, SECTION_MODEL, delay,
+            )
+            time.sleep(delay)
+    raise last_exc or RuntimeError("section chat completion failed")
 
 
 # ---------------------------------------------------------------------------
@@ -390,9 +422,8 @@ def read_section(
     )
 
     try:
-        response = client.chat.completions.create(
-            model=SECTION_MODEL,
-            temperature=0.0,
+        response = _chat_completion_with_retry(
+            section=section,
             messages=[
                 {"role": "system", "content": SECTION_SYSTEM},
                 {"role": "user",   "content": user_msg},

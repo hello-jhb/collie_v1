@@ -471,23 +471,18 @@ def _run_bounded_extraction(
             for m in bounded:
                 by_section.setdefault(m.get("section") or "other", []).append(m)
 
-            # Run the section reads CONCURRENTLY — each is an independent,
-            # I/O-bound GPT call. 5 sections in parallel cuts wall-clock from
-            # ~sum to ~max of the individual reads (~100s → ~30s).
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            # Run section reads sequentially. Parallel section reads caused
+            # hosted deployments to exceed OpenAI TPM limits on large models
+            # (BAC/St Regis) and left Streamlit in a bad state.
             jobs = {sec: by_section.get(sec, []) for sec in SECTION_ORDER}
             jobs = {sec: ms for sec, ms in jobs.items() if ms}
-            with ThreadPoolExecutor(max_workers=len(jobs) or 1) as ex:
-                futures = {
-                    ex.submit(read_section, sec, ms, file_path, nominated, model_units_mult): sec
-                    for sec, ms in jobs.items()
-                }
-                for fut in as_completed(futures):
-                    sec = futures[fut]
-                    try:
-                        section_results.update(fut.result())
-                    except Exception as e:
-                        _log.error("Section %s read crashed: %s", sec, e)
+            for sec, ms in jobs.items():
+                try:
+                    section_results.update(
+                        read_section(sec, ms, file_path, nominated, model_units_mult)
+                    )
+                except Exception as e:
+                    _log.error("Section %s read crashed: %s", sec, e)
         except Exception as e:
             _log.error("Section reader failed for %s: %s", file_path.name, e)
             section_results = {}
@@ -551,8 +546,9 @@ def _run_bounded_extraction(
     bounded_metrics: dict[str, Any] = {}
     section_hits = 0
     fallback_uses = 0
-    # Bounded worker count — enough to overlap the I/O without hammering the API.
-    with ThreadPoolExecutor(max_workers=min(8, len(bounded) or 1)) as ex:
+    # Keep worker count low: this loop can trigger GPT fallback/resolver calls.
+    # More workers are faster locally but can burst past hosted TPM limits.
+    with ThreadPoolExecutor(max_workers=min(2, len(bounded) or 1)) as ex:
         for name, record, is_section in ex.map(_build_one, bounded):
             if is_section:
                 section_hits += 1
@@ -976,6 +972,26 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         _log.error("Analyst bundle failed for %s: %s", filename, e)
         analyst_bundle = {"error": str(e)}
 
+    analyst_bundle_summary = (
+        analyst_bundle if "error" in analyst_bundle else {
+            "bundle_path": analyst_bundle.get("bundle_path"),
+            "status_summary": analyst_bundle.get("status_summary", {}),
+            "verified_count": len(analyst_bundle.get("verified_facts", [])),
+            "issues_count": len(analyst_bundle.get("issues", [])),
+            "workbook_sheet_count": len(
+                (analyst_bundle.get("workbook_map") or {}).get("all_sheets", [])
+            ),
+            "active_patterns_loaded": (
+                (analyst_bundle.get("knowledge_usage") or {})
+                .get("active_patterns_loaded", 0)
+            ),
+            "fired_patterns": (
+                (analyst_bundle.get("knowledge_usage") or {})
+                .get("fired_patterns", [])
+            ),
+        }
+    )
+
     t_total = time.time() - t_start
     _log.info("INGEST %s — TOTAL %.1fs", filename, t_total)
 
@@ -1001,7 +1017,7 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         "bounded_status_counts": bounded_status_counts,
         "bounded_cache":         "HIT" if bounded_cache_hit else "MISS",
         # Reviewable analyst run package
-        "analyst_bundle":        analyst_bundle,
+        "analyst_bundle":        analyst_bundle_summary,
     }
 
 

@@ -936,9 +936,15 @@ def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
                 trace = trace_from_verified(UPLOAD_DIR / files[0], anchors)
                 trace["version"] = FORMULA_TRACER_VERSION
                 ssot.attach_formula_trace("underwriting", trace)
+                # Fold traced metrics into bounded_metrics so the snapshot AND
+                # deep-dives use them (fill-only; never clobbers verified facts).
+                _, n_merged = ssot.merge_traced_metrics("underwriting", trace)
                 n_reached = len(trace.get("reached_metrics", {}))
                 if n_reached:
-                    st.markdown(f"🔗 Traced **{n_reached}** related metric(s) from verified cells.")
+                    st.markdown(
+                        f"🔗 Traced **{n_reached}** related metric(s) from verified cells "
+                        f"({n_merged} filled gaps in the checklist)."
+                    )
             except Exception as e:
                 st.caption(f"(Formula trace skipped: {e})")
 

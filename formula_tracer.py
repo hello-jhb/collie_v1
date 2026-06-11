@@ -217,8 +217,23 @@ def _nearest_label(ws, row: int, col: int) -> str | None:
     return None
 
 
+def _metric_quality(m: dict) -> int:
+    """
+    Tiebreaker when an alias maps to several metrics: prefer schema-complete,
+    checklist metrics over degenerate/legacy catalog entries (e.g. the catalog
+    has both a ratio "Loan-to-Cost (LTC)" and a junk USD "LTC" sharing "LTC").
+    """
+    q = 0
+    if m.get("range_min") is not None and m.get("range_max") is not None:
+        q += 2
+    if m.get("in_bounded_list"):
+        q += 1
+    return q
+
+
 def _build_alias_index(catalog: list[dict], exclude_ids: set[str]) -> list[tuple[str, dict]]:
-    """[(normalized_alias, metric)] for non-AAM metrics, longest alias first."""
+    """[(normalized_alias, metric)] for non-AAM metrics — most specific + highest
+    quality first, so first-match wins the best candidate."""
     idx: list[tuple[str, dict]] = []
     for m in catalog:
         if m["metric_id"] in exclude_ids:
@@ -227,7 +242,8 @@ def _build_alias_index(catalog: list[dict], exclude_ids: set[str]) -> list[tuple
             a = normalize_text(alias)
             if a and len(a) >= 3:
                 idx.append((a, m))
-    idx.sort(key=lambda t: -len(t[0]))  # prefer more specific (longer) aliases
+    # Longer (more specific) aliases first; within equal length, higher quality.
+    idx.sort(key=lambda t: (-len(t[0]), -_metric_quality(t[1])))
     return idx
 
 

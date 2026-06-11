@@ -263,6 +263,86 @@ def apply_verified_aam(
     return ssot
 
 
+def merge_traced_metrics(
+    layer: str,
+    trace: dict[str, Any],
+    ssot: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """
+    Fold Stage-2 formula-traced metrics into a layer's bounded_metrics so the
+    snapshot AND deep-dives can use them — not just sit in `formula_trace`.
+
+    Fill-only: a traced value is written ONLY where the layer has no usable
+    value for that metric (missing/suspicious/absent). It never overwrites a
+    verified / candidate_pool / human-verified fact. Written as status="derived"
+    with `traced=True` and provenance back to the anchor it came from.
+
+    Returns (ssot, n_merged).
+    """
+    if ssot is None:
+        ssot = load_ssot()
+    lyr = ssot["layers"].get(layer)
+    if not lyr:
+        return ssot, 0
+
+    from metric_catalog import load_metric_catalog
+    from metric_resolver import _format_display
+
+    catalog = {m["metric_id"]: m for m in load_metric_catalog()}
+    bm = lyr.setdefault("bounded_metrics", {})
+    merged = 0
+
+    for mid, m in (trace or {}).get("reached_metrics", {}).items():
+        mcat = catalog.get(mid, {})
+        name = mcat.get("metric_name") or m.get("metric_name")  # canonical catalog name
+        val = m.get("value")
+        if not name or val is None:
+            continue
+
+        # Schema guard: drop traced values that fall outside the metric's range.
+        # Protects against ambiguous label matches (e.g. the catalog has both a
+        # ratio "Loan-to-Cost (LTC)" and a junk USD "LTC" sharing the alias).
+        rmin, rmax = mcat.get("range_min"), mcat.get("range_max")
+        if (
+            rmin is not None and rmax is not None
+            and isinstance(val, (int, float)) and not (rmin <= val <= rmax)
+        ):
+            continue
+
+        existing = bm.get(name)
+        if (
+            existing
+            and existing.get("normalized_value") is not None
+            and existing.get("status") in ("verified", "candidate_pool", "derived", "inferred")
+        ):
+            continue  # the pipeline already has a usable value — don't clobber it
+
+        unit = mcat.get("unit")
+        scale = mcat.get("scale")
+        sheet, _, cell = str(m.get("source", "")).partition("!")
+        bm[name] = {
+            "metric_name":      name,
+            "metric_id":        mid,
+            "raw_value":        val,
+            "normalized_value": val,
+            "display_value":    _format_display(val, unit, scale),
+            "unit":             unit,
+            "scale":            scale,
+            "source_sheet":     sheet or None,
+            "source_cell":      cell or None,
+            "status":           "derived",
+            "validation_notes": [
+                f"Reached via formula trace from {m.get('via_anchor')} (hop {m.get('hop')})."
+            ],
+            "traced":           True,
+        }
+        merged += 1
+
+    lyr["bounded_metrics"] = bm
+    save_ssot(ssot)
+    return ssot, merged
+
+
 def attach_formula_trace(
     layer: str,
     trace: dict[str, Any],

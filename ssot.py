@@ -263,6 +263,53 @@ def apply_verified_aam(
     return ssot
 
 
+def attach_model_tables(
+    layer: str,
+    tables: list[dict[str, Any]],
+    version: str | None = None,
+    ssot: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """
+    Attach a compact summary of the parsed financial-model tables to a layer AND
+    tag each bounded_metric with the periodicity of the table its source cell
+    belongs to (so a metric like NOI inherits 'monthly' / 'annual' instead of
+    being guessed per-row). Atomic: tags + attaches in one load/save.
+
+    Returns (ssot, n_tagged).
+    """
+    if ssot is None:
+        ssot = load_ssot()
+    lyr = ssot["layers"].get(layer)
+    if not lyr:
+        return ssot, 0
+
+    from financial_model_parser import tag_metric_periodicity
+
+    bm = lyr.get("bounded_metrics", {}) or {}
+    tagged = tag_metric_periodicity(tables, bm)
+
+    lyr["model_tables"] = {
+        "version":  version,
+        "count":    len(tables),
+        "tagged_metrics": tagged,
+        "tables": [
+            {
+                "sheet":       t["sheet"],
+                "title":       t["title"],
+                "table_type":  t["table_type"],
+                "periodicity": t["periodicity"],
+                "n_periods":   len(t["date_headers"]),
+                "n_rows":      len(t["rows"]),
+                "row_labels":  [r["label"] for r in t["rows"][:40]],
+            }
+            for t in tables
+        ],
+        "attached_at": _now_iso(),
+    }
+    save_ssot(ssot)
+    return ssot, tagged
+
+
 def merge_traced_metrics(
     layer: str,
     trace: dict[str, Any],

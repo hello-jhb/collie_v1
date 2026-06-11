@@ -303,6 +303,39 @@ def _ssot_panel() -> None:
     except Exception:
         pass
 
+    # Model Tables — the table-centric read: which tables Collie found and the
+    # periodicity each one (and its rows) carries.
+    try:
+        uw = ssot.load_ssot().get("layers", {}).get("underwriting", {}) or {}
+        mt = uw.get("model_tables") or {}
+        if mt.get("tables"):
+            with st.expander(
+                f"📐 Model Tables — {mt.get('count', 0)} parsed · "
+                f"{mt.get('tagged_metrics', 0)} metric(s) tagged with periodicity",
+                expanded=False,
+            ):
+                st.caption(
+                    "Each table's date header sets its periodicity; every row "
+                    "inherits it. Flow metrics (NOI, revenue, expenses) extracted "
+                    "from a table cell are tagged accordingly."
+                )
+                st.dataframe(
+                    [
+                        {
+                            "sheet": t["sheet"],
+                            "table": t.get("title") or "—",
+                            "type": t["table_type"],
+                            "periodicity": t["periodicity"],
+                            "periods": t["n_periods"],
+                            "rows": t["n_rows"],
+                        }
+                        for t in mt["tables"]
+                    ],
+                    width="stretch",
+                )
+    except Exception:
+        pass
+
     # Analyst Bundle — the reviewable run package: what Collie looked at,
     # what it believes, and what it refused to trust. The trust bridge.
     try:
@@ -861,6 +894,16 @@ def _render_aam_gate(agent: AgentSession) -> None:
         with st.status(f"Reading audit-appendix metrics from {primary}…", expanded=False):
             from aam_extractor import extract_aam
             st.session_state.aam_records = extract_aam(UPLOAD_DIR / primary, use_gpt_gap_fill=False)
+            # Tag flow metrics with their table's periodicity so the human sees
+            # "NOI — monthly" while verifying. Parse is cached (paid once/file).
+            try:
+                from financial_model_parser import parse_workbook_tables_cached, tag_metric_periodicity
+                tag_metric_periodicity(
+                    parse_workbook_tables_cached(UPLOAD_DIR / primary),
+                    st.session_state.aam_records,
+                )
+            except Exception:
+                pass
         st.session_state.aam_batch_id = batch_id
         st.session_state.aam_fill_version = 0
 
@@ -886,6 +929,7 @@ def _render_aam_gate(agent: AgentSession) -> None:
             "Metric":  rec.get("metric_name", mid),
             "Value":   _aam_editable_value(rec),
             "Display": rec.get("display_value") or "—",
+            "Period":  rec.get("table_periodicity") or "—",
             "Source":  source,
             "Status":  rec.get("status", "missing"),
         })
@@ -895,7 +939,7 @@ def _render_aam_gate(agent: AgentSession) -> None:
         key=f"aam_editor_{abs(hash(batch_id))}_{st.session_state.aam_fill_version}",
         width="stretch",
         hide_index=True,
-        disabled=["Group", "Metric", "Display", "Source", "Status"],
+        disabled=["Group", "Metric", "Display", "Period", "Source", "Status"],
         column_config={
             "Value": st.column_config.TextColumn(
                 "Value (editable)", help="Correct the value if it's wrong. Numbers are raw (unformatted)."
@@ -932,6 +976,12 @@ def _fill_aam_blanks(records: dict) -> None:
     with st.status("Filling blanks with a focused GPT read…", expanded=False):
         from aam_extractor import fill_aam_blanks
         filled = fill_aam_blanks(UPLOAD_DIR / primary, records)
+        # Re-tag periodicity so newly-filled flow metrics inherit it too (cached).
+        try:
+            from financial_model_parser import parse_workbook_tables_cached, tag_metric_periodicity
+            tag_metric_periodicity(parse_workbook_tables_cached(UPLOAD_DIR / primary), records)
+        except Exception:
+            pass
     st.session_state.aam_records = records
     st.session_state.aam_fill_version += 1  # force the editor to rebuild
     st.toast(f"GPT filled {filled} field(s) — review before confirming.")
@@ -981,6 +1031,23 @@ def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
                     )
             except Exception as e:
                 st.caption(f"(Formula trace skipped: {e})")
+
+            # Table-centric parse: detect model tables + tag each metric with its
+            # table's periodicity (so NOI etc. inherit monthly/annual, not guessed).
+            try:
+                status.update(label="Reading model tables (periodicity)…")
+                from financial_model_parser import parse_workbook_tables_cached, MODEL_PARSER_VERSION
+                tables = parse_workbook_tables_cached(UPLOAD_DIR / files[0])
+                _, n_tagged = ssot.attach_model_tables(
+                    "underwriting", tables, version=MODEL_PARSER_VERSION
+                )
+                if tables:
+                    st.markdown(
+                        f"📐 Parsed **{len(tables)}** model table(s); tagged "
+                        f"**{n_tagged}** metric(s) with table periodicity."
+                    )
+            except Exception as e:
+                st.caption(f"(Model-table parse skipped: {e})")
 
             status.update(label="Verified, ingested & traced", state="complete")
 

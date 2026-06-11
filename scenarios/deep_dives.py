@@ -68,6 +68,40 @@ def _resolve_bounded(bounded: dict, name: str) -> dict | None:
     return None
 
 
+def _ts_block(file_path, keywords: tuple[str, ...], max_rows: int = 16,
+              header: str = "Time series (relevant rows):") -> str:
+    """
+    Parser-backed time-series block filtered to rows whose label matches any
+    keyword. Authoritative periodicity + annualization come from the model
+    parser; falls back to the heuristic extractor when no tables are found.
+    """
+    try:
+        from financial_model_parser import build_time_series
+        ts = build_time_series(file_path) or extract_time_series_rows(file_path)
+    except Exception:
+        return ""
+    rel = [r for r in ts if any(k in r["label"].lower() for k in keywords)][:max_rows]
+    if not rel:
+        return ""
+    lines = ["", header]
+    for s in rel:
+        values = s.get("annual_values") or s.get("values") or []
+        headers = s.get("annual_headers") or s.get("headers") or []
+        if s.get("annualized"):
+            meta = f" [annualized from {s.get('periodicity')}; {s.get('aggregation_method')}]"
+        elif s.get("periodicity"):
+            meta = f" [{s.get('periodicity')}]"
+        else:
+            meta = ""
+        vals = " | ".join(
+            f"{v:,.0f}" if isinstance(v, (int, float)) and v else "—"
+            for v in values[:8]
+        )
+        header_str = " | ".join(str(h) for h in headers[:8])
+        lines.append(f"  [{s['sheet']}] {s['label']}{meta}: {header_str} => {vals}")
+    return "\n".join(lines)
+
+
 def _bounded_pretty(bounded: dict, metric_names: list[str]) -> str:
     """Pretty-print a subset of bounded metrics for a deep-dive prompt."""
     if not bounded:
@@ -148,9 +182,23 @@ def deep_dive_capital_structure() -> dict[str, Any]:
         "Loan Maturity", "Interest-Only Period Remaining",
         "DSCR / Debt Coverage Ratio", "Debt Yield",
     ]
+    # Structured debt schedule (amort / interest / balance over time), parsed.
+    debt_block = ""
+    source_file = uw.get("source_file")
+    if source_file:
+        fp = UPLOAD_DIR / source_file
+        if fp.exists():
+            debt_block = _ts_block(
+                fp,
+                ("debt service", "interest expense", "interest", "amortization",
+                 "principal", "loan balance", "debt balance", "maturity", "debt addition"),
+                header="Debt schedule (parsed from debt / cash-flow tables — periodicity-aware):",
+            )
+
     user_prompt = (
         "Bounded metrics for Capital Structure:\n\n"
         + _bounded_pretty(bounded, relevant)
+        + debt_block
         + "\n\nWrite the Capital Structure section."
     )
     text = complete(_CAPITAL_STRUCTURE_SYSTEM, user_prompt, temperature=0.1)
@@ -200,41 +248,16 @@ def deep_dive_cash_flow() -> dict[str, Any]:
         "Total Units", "Total SF",
     ]
 
-    # Time series from the source workbook
+    # Time series from the source workbook (parser-backed, periodicity-aware).
     source_file = uw.get("source_file")
     ts_block = ""
     if source_file:
         fp = UPLOAD_DIR / source_file
         if fp.exists():
-            try:
-                ts = extract_time_series_rows(fp)
-                # Only the NOI/Revenue/Expense series
-                relevant_ts = [
-                    r for r in ts
-                    if any(k in r["label"].lower() for k in (
-                        "noi", "net operating income", "revenue",
-                        "egi", "gross income", "operating expense", "cash flow",
-                    ))
-                ][:20]
-                if relevant_ts:
-                    ts_lines = ["", "Time series (relevant rows):"]
-                    for s in relevant_ts:
-                        values = s.get("annual_values") or s["values"]
-                        headers = s.get("annual_headers") or s.get("headers") or []
-                        meta = ""
-                        if s.get("annualized"):
-                            meta = f" [annualized from monthly; {s.get('aggregation_method')}]"
-                        elif s.get("periodicity"):
-                            meta = f" [{s.get('periodicity')}]"
-                        vals = " | ".join(
-                            f"{v:,.0f}" if isinstance(v, (int, float)) and v else "—"
-                            for v in values[:8]
-                        )
-                        header_str = " | ".join(str(h) for h in headers[:8])
-                        ts_lines.append(f"  [{s['sheet']}] {s['label']}{meta}: {header_str} => {vals}")
-                    ts_block = "\n".join(ts_lines)
-            except Exception:
-                pass
+            ts_block = _ts_block(fp, (
+                "noi", "net operating income", "revenue",
+                "egi", "gross income", "operating expense", "cash flow",
+            ), max_rows=20)
 
     user_prompt = (
         "Bounded metrics for Cash Flow / NOI:\n\n"
@@ -344,26 +367,10 @@ def deep_dive_capex_plan() -> dict[str, Any]:
     if source_file:
         fp = UPLOAD_DIR / source_file
         if fp.exists():
-            try:
-                ts = extract_time_series_rows(fp)
-                relevant_ts = [
-                    r for r in ts
-                    if any(k in r["label"].lower() for k in (
-                        "capex", "hard cost", "soft cost", "construction",
-                        "total project", "draw", "tenant improvement", "ti",
-                    ))
-                ][:25]
-                if relevant_ts:
-                    ts_lines = ["", "CapEx-related time series:"]
-                    for s in relevant_ts:
-                        vals = " | ".join(
-                            f"{v:,.0f}" if isinstance(v, (int, float)) and v else "—"
-                            for v in s["values"][:8]
-                        )
-                        ts_lines.append(f"  [{s['sheet']}] {s['label']}: {vals}")
-                    ts_block = "\n".join(ts_lines)
-            except Exception:
-                pass
+            ts_block = _ts_block(fp, (
+                "capex", "hard cost", "soft cost", "construction",
+                "total project", "draw", "tenant improvement", "ti",
+            ), max_rows=25, header="CapEx-related time series (periodicity-aware):")
 
     user_prompt = (
         "Bounded metrics for CapEx Plan:\n\n"

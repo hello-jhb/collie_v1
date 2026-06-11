@@ -86,6 +86,11 @@ Risks, Audit Appendix, Capital Structure, Cash Flow, Return Profile, or CapEx
 FLOATING-RATE NOTE: if Interest Rate Spread AND Interest Rate Cap are both
 present the debt is floating; if you mention the rate, express it as
 "<Spread>% spread + <Cap>% cap" rather than a single fixed rate.
+
+PERIODICITY NOTE: a metric tagged `[table:monthly]` or `[table:quarterly]` is a
+SINGLE-PERIOD figure from a roll-up table (e.g. one month's NOI) — NEVER present
+it as an annual number. For an annual figure use the TIME SERIES (annual NOI)
+instead, and say "monthly" / "annualized" explicitly when you cite it.
 """
 
 
@@ -205,7 +210,9 @@ def _format_bounded_metrics(bounded: dict) -> str:
         cell_ref = f"{sheet}!{cell}" if sheet and cell else "—"
         period = rec.get("period")
         period_tag = f" [{period}]" if period and period != "n/a" else ""
-        return f"  - **{name}**{period_tag}: {val}  ({cell_ref})"
+        tp = rec.get("table_periodicity")
+        tp_tag = f" [table:{tp}]" if tp else ""
+        return f"  - **{name}**{period_tag}{tp_tag}: {val}  ({cell_ref})"
 
     lines = []
     if verified:
@@ -328,7 +335,10 @@ def generate_deal_review() -> dict[str, Any]:
         file_path = UPLOAD_DIR / source_file
         if file_path.exists():
             try:
-                ts = extract_time_series_rows(file_path)
+                # Parser-first: table periodicity is authoritative. Fall back to
+                # the heuristic extractor only if no relevant tables were found.
+                from financial_model_parser import build_time_series
+                ts = build_time_series(file_path) or extract_time_series_rows(file_path)
                 time_series_block = _format_time_series_block(ts)
             except Exception as e:
                 time_series_block = f"(time series extraction failed: {e})"

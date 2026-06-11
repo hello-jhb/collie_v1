@@ -284,22 +284,47 @@ def _ssot_panel() -> None:
     # JSON Knowledge diagnostics — which human-approved patterns are live.
     # Only `active` patterns influence runtime prompts; candidates/invalid don't.
     try:
-        from knowledge_store import knowledge_diagnostics
+        from knowledge_store import (
+            knowledge_diagnostics, load_observations, load_learned_patterns,
+            set_pattern_status,
+        )
         kd = knowledge_diagnostics()
         n_active = kd.get("active_patterns_loaded", 0)
-        n_cand = len(kd.get("candidate_patterns_ignored", []) or [])
+        n_cand = kd.get("candidate_patterns_ignored", 0)          # int count
         n_inv = len(kd.get("invalid_patterns", []) or [])
+        observations = load_observations()
+        learned = load_learned_patterns()
+        candidates = [r for r in learned if str(r.get("status")).lower() == "candidate"]
         with st.expander(
-            f"🧠 JSON Knowledge — {n_active} active / {n_cand} candidate / {n_inv} invalid",
+            f"🧠 JSON Knowledge — {n_active} active / {n_cand} candidate / {n_inv} invalid "
+            f"· {len(observations)} obs",
             expanded=False,
         ):
             st.caption(
-                "Only **active** patterns are injected into runtime prompts "
-                "(workbook mapping, AAM extraction, blank-fill, resolver, "
-                "business-plan). Candidates are evidence awaiting human promotion; "
-                "invalid are skipped."
+                "Only **active** patterns are injected into runtime prompts (AAM "
+                "extraction, blank-fill, resolver, workbook mapping, business-plan). "
+                "Your corrections at the gate are captured as observations; repeated "
+                "ones become candidates you can promote. GPT never self-promotes."
             )
             st.json(kd)
+
+            if candidates:
+                st.markdown("**Learned candidates** — promote to let them influence extraction:")
+                for c in candidates:
+                    st.markdown(
+                        f"- `{c['rule_id']}` · evidence **{c.get('evidence_count')}** — "
+                        f"{c.get('description', '')[:200]}"
+                    )
+                    cprom, crej, _sp = st.columns([1, 1, 5])
+                    if cprom.button("✅ Promote", key=f"promote_{c['rule_id']}"):
+                        set_pattern_status(c["rule_id"], "active")
+                        st.rerun()
+                    if crej.button("✕ Reject", key=f"reject_{c['rule_id']}"):
+                        set_pattern_status(c["rule_id"], "rejected")
+                        st.rerun()
+            else:
+                st.caption(f"No learned candidates yet ({len(observations)} observation(s) "
+                           "accumulating; a metric needs ≥3 corrections to surface one).")
     except Exception:
         pass
 
@@ -873,6 +898,9 @@ def _collect_verified(records: dict, edited) -> dict:
             "source_sheet": rec.get("source_sheet"),
             "source_cell":  rec.get("source_cell"),
             "note":         note,
+            "metric_id":    rec.get("metric_id"),
+            "corrected":    (not unchanged) and ok,   # real human correction
+            "engine_value": rec.get("display_value") or rec.get("normalized_value"),
         }
     return verified
 
@@ -1007,6 +1035,33 @@ def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
             if verified:
                 ssot.apply_verified_aam("underwriting", verified)
                 st.markdown(f"📌 Applied **{len(verified)}** human-verified value(s).")
+
+                # Learning capture: each human CORRECTION becomes a deal-specific
+                # observation; repeated ones synthesize into candidate rules (never
+                # runtime-active until a human promotes them).
+                try:
+                    import knowledge_store as ks
+                    n_obs = 0
+                    for name, v in verified.items():
+                        if v.get("corrected"):
+                            ks.record_observation(
+                                metric_id=v.get("metric_id") or name,
+                                metric_name=name,
+                                engine_value=v.get("engine_value"),
+                                actual_value=v.get("value"),
+                                source_sheet=v.get("source_sheet"),
+                                source_cell=v.get("source_cell"),
+                                source_file=files[0],
+                            )
+                            n_obs += 1
+                    if n_obs:
+                        ks.synthesize_candidates()
+                        st.markdown(
+                            f"📚 Captured **{n_obs}** correction(s) as learning evidence "
+                            f"(review candidates in the SSOT panel)."
+                        )
+                except Exception as e:
+                    st.caption(f"(Learning capture skipped: {e})")
 
             # Stage 2: trace formulas out from the verified anchors to reach
             # related (non-AAM) metrics. Additive enrichment — never blocks.

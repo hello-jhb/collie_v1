@@ -16,6 +16,7 @@ status in the pattern catalog.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 from functools import lru_cache
@@ -38,10 +39,27 @@ PATTERN_FILES = {
     "business_plan_patterns": "business_plan_patterns.json",
 }
 
+# Auto-synthesized learning candidates live in their own file, separate from the
+# curated pattern files, so the learning loop never edits hand-authored rules.
+LEARNED_FILE = "learned_patterns.json"
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=str)
+
 
 def _read_json(path: Path) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -125,6 +143,15 @@ def _iter_pattern_rules(base_dir: Path) -> list[dict[str, Any]]:
     business_payload = _read_json(patterns_dir / PATTERN_FILES["business_plan_patterns"])
     for pattern in business_payload.get("patterns", []):
         rules.append(_rule_from_business(pattern))
+
+    # Auto-synthesized learning candidates (already in runtime-rule shape).
+    # status=candidate is ignored at runtime; status=active (human-promoted) is
+    # loaded like any curated active rule.
+    learned_payload = _read_json(patterns_dir / LEARNED_FILE)
+    for rule in learned_payload.get("rules", []):
+        r = dict(rule)
+        r.setdefault("source_file", LEARNED_FILE)
+        rules.append(r)
 
     return rules
 
@@ -281,3 +308,144 @@ def load_observations(base_dir: Path | str = KNOWLEDGE_DIR) -> list[dict[str, An
     for path in sorted(observations_dir.glob("*.json")):
         out.append(_read_json(path))
     return out
+
+
+# =============================================================================
+# Learning-candidate pipeline: user override -> observation -> candidate -> active
+# (GPT never self-teaches; a human promotes candidates. Candidates and
+#  observations NEVER influence runtime — only `active` patterns do.)
+# =============================================================================
+
+def record_observation(
+    *,
+    metric_id: str,
+    metric_name: str,
+    engine_value: Any,
+    actual_value: Any,
+    source_sheet: str | None = None,
+    source_cell: str | None = None,
+    source_file: str | None = None,
+    base_dir: Path | str = KNOWLEDGE_DIR,
+) -> str:
+    """
+    Capture a human override as a deal-specific observation (never runtime).
+    Returns the observation_id.
+    """
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    obs_id = f"{metric_id}_{ts}"
+    obs = {
+        "observation_id": obs_id,
+        "created_at": _now_iso(),
+        "status": "unreviewed",
+        "review": {"source": "user_override", "reviewer": "human", "verified": True, "notes": ""},
+        "file_context": {"source_file": source_file, "source_file_hash": None},
+        "observation": {
+            "metric": metric_id,
+            "metric_name": metric_name,
+            "engine_result": engine_value,
+            "actual_source": {"sheet": source_sheet, "cell": source_cell},
+            "actual_value": actual_value,
+            "lesson": f"{metric_id}_corrected_by_user",
+        },
+    }
+    _write_json(Path(base_dir) / "observations" / f"{obs_id}.json", obs)
+    return obs_id
+
+
+def load_learned_patterns(base_dir: Path | str = KNOWLEDGE_DIR) -> list[dict[str, Any]]:
+    """All auto-synthesized learning rules (any status). UI/debug helper."""
+    payload = _read_json(Path(base_dir) / "patterns" / LEARNED_FILE)
+    return list(payload.get("rules", []))
+
+
+def synthesize_candidates(min_evidence: int = 3,
+                          base_dir: Path | str = KNOWLEDGE_DIR) -> list[dict[str, Any]]:
+    """
+    Distill repeated user-override observations into CANDIDATE rules (drafts for
+    human review). status=candidate never affects runtime. A human promotes a
+    candidate to `active` to make it influence extraction. Returns the current
+    candidate list. Idempotent: re-running updates evidence counts in place and
+    never disturbs a promoted/rejected candidate's status.
+    """
+    base = Path(base_dir)
+    groups: dict[str, list[dict]] = {}
+    for o in load_observations(base):
+        if (o.get("review") or {}).get("source") != "user_override":
+            continue
+        mid = (o.get("observation") or {}).get("metric")
+        if mid:
+            groups.setdefault(mid, []).append(o)
+
+    learned_path = base / "patterns" / LEARNED_FILE
+    payload = _read_json(learned_path)
+    by_id = {r.get("rule_id"): r for r in payload.get("rules", [])}
+    changed = False
+
+    for mid, obs_list in groups.items():
+        if len(obs_list) < min_evidence:
+            continue
+        rule_id = f"{mid}_user_corrected"
+        ids = [o["observation_id"] for o in obs_list]
+        existing = by_id.get(rule_id)
+        if existing:
+            # Refresh evidence but never override a human decision.
+            existing["evidence_count"] = len(obs_list)
+            existing["evidence_observation_ids"] = ids
+            changed = True
+            continue
+        last = obs_list[-1]["observation"]
+        by_id[rule_id] = {
+            "rule_id":        rule_id,
+            "status":         "candidate",          # NOT active — human must promote
+            "scope":          "metric_resolution",
+            "description":    (
+                f"'{last.get('metric_name', mid)}' was human-corrected "
+                f"{len(obs_list)} time(s); engine commonly returned "
+                f"'{last.get('engine_result')}', actual e.g. '{last.get('actual_value')}'. "
+                f"Review whether a reusable extraction/validation rule is warranted."
+            ),
+            "condition":      f"metric == '{mid}'",
+            "action":         "review extraction source / units for this metric",
+            "confidence":     0.3,
+            "evidence_count": len(obs_list),
+            "contradiction_count": 0,
+            "evidence_sources": ["user_override"],
+            "evidence_observation_ids": ids,
+            "created_at":     _now_iso(),
+        }
+        changed = True
+
+    if changed:
+        _write_json(learned_path, {
+            "version": _now_iso(),
+            "description": (
+                "Auto-synthesized learning candidates from user overrides. "
+                "status=candidate NEVER affects runtime; a human promotes to "
+                "active after review."
+            ),
+            "rules": list(by_id.values()),
+        })
+        _load_pattern_catalog.cache_clear()
+
+    return [r for r in by_id.values() if str(r.get("status")).lower() == "candidate"]
+
+
+def set_pattern_status(rule_id: str, status: str,
+                       base_dir: Path | str = KNOWLEDGE_DIR) -> bool:
+    """
+    Human decision on a learned candidate: 'active' (promote → influences
+    runtime), 'rejected', or back to 'candidate'. Returns True if found.
+    """
+    learned_path = Path(base_dir) / "patterns" / LEARNED_FILE
+    payload = _read_json(learned_path)
+    rules = payload.get("rules", [])
+    found = False
+    for r in rules:
+        if r.get("rule_id") == rule_id:
+            r["status"] = status
+            r["reviewed_at"] = _now_iso()
+            found = True
+    if found:
+        _write_json(learned_path, payload)
+        _load_pattern_catalog.cache_clear()
+    return found

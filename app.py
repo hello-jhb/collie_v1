@@ -1035,33 +1035,11 @@ def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
             if verified:
                 ssot.apply_verified_aam("underwriting", verified)
                 st.markdown(f"📌 Applied **{len(verified)}** human-verified value(s).")
-
-                # Learning capture: each human CORRECTION becomes a deal-specific
-                # observation; repeated ones synthesize into candidate rules (never
-                # runtime-active until a human promotes them).
-                try:
-                    import knowledge_store as ks
-                    n_obs = 0
-                    for name, v in verified.items():
-                        if v.get("corrected"):
-                            ks.record_observation(
-                                metric_id=v.get("metric_id") or name,
-                                metric_name=name,
-                                engine_value=v.get("engine_value"),
-                                actual_value=v.get("value"),
-                                source_sheet=v.get("source_sheet"),
-                                source_cell=v.get("source_cell"),
-                                source_file=files[0],
-                            )
-                            n_obs += 1
-                    if n_obs:
-                        ks.synthesize_candidates()
-                        st.markdown(
-                            f"📚 Captured **{n_obs}** correction(s) as learning evidence "
-                            f"(review candidates in the SSOT panel)."
-                        )
-                except Exception as e:
-                    st.caption(f"(Learning capture skipped: {e})")
+                # NOTE: learning-capture (override → observation → candidate) is
+                # UNHOOKED. To re-enable, restore the record_observation /
+                # synthesize_candidates loop here over `verified` corrected entries
+                # (helpers in knowledge_store.py are intact). Reading active
+                # patterns into prompts is independent and remains on.
 
             # Stage 2: trace formulas out from the verified anchors to reach
             # related (non-AAM) metrics. Additive enrichment — never blocks.

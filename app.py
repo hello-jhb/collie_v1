@@ -47,7 +47,7 @@ st.markdown(
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
   html, body, .stApp { font-family: "Inter", system-ui, sans-serif; }
-  .block-container { padding-top: 2rem; max-width: 1100px; }
+  .block-container { padding-top: 2rem; max-width: 1500px; }
 
   /* Hero */
   .hero-title { font-size: 32px; font-weight: 700; margin-bottom: 4px; }
@@ -81,6 +81,15 @@ st.markdown(
   .scenario-card .label.soon    { background: #f3f4f6; color: #6b7280; }
   .scenario-card .title  { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
   .scenario-card .desc   { font-size: 13px; color: #4b5563; line-height: 1.5; min-height: 56px; }
+
+  /* Deal Analyzer (3-column) */
+  .da-header { display: flex; align-items: baseline; gap: 14px; }
+  .da-title  { font-size: 26px; font-weight: 700; }
+  .da-date   { font-size: 13px; color: #6b7280; }
+  .da-col-title {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #6b7280; margin-bottom: 10px;
+  }
 
   /* Scoped workspace header */
   .ws-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 18px; }
@@ -146,6 +155,16 @@ _SESSION_DEFAULTS: dict = {
     # Batches for which the user explicitly requested analysis (staged: facts
     # are confirmed first, then analysis is a separate deliberate step).
     "aam_analysis_requested": set(),
+    # --- Deal Analyzer 3-column frontend (deal_review) ---
+    # Findings folded into the Outcome (middle column) from the chat / deep-dives.
+    # Shape: list of {"id": str, "title": str, "content": str}
+    "outcome_findings":   [],
+    # Content signatures already folded into the Outcome (dedupe the +Add button).
+    "outcome_added":      set(),
+    # Generated Snapshot narrative shown in the Outcome (middle column).
+    "snapshot_md":        None,
+    # The memorialized final report — this is what becomes the persisted SSOT.
+    "final_report_md":    None,
 }
 
 
@@ -595,6 +614,12 @@ def render_scenario() -> None:
     cfg = SCENARIO_CONFIG[scenario_key]
     agent: AgentSession = st.session_state.agent_session
 
+    # deal_review uses the 3-column Deal Analyzer; other scenarios keep the
+    # legacy single-column workspace below.
+    if scenario_key == "deal_review":
+        _render_deal_analyzer(agent)
+        return
+
     # Header
     left, right = st.columns([4, 1])
     with left:
@@ -641,41 +666,21 @@ def render_scenario() -> None:
             st.markdown(m["content"])
 
     # ---------------------------------------------------------------------
-    # Deterministic orchestration.
+    # Deterministic orchestration (legacy scenarios only; deal_review uses the
+    # 3-column Deal Analyzer and returns earlier).
     # ---------------------------------------------------------------------
 
-    # Stage-1 verification gate (deal_review only): before any ingest/analysis,
-    # extract the Audit Appendix Metrics, let the human verify them, and BLOCK
-    # until they confirm. The full pipeline + analysis run only after confirm.
-    if scenario_key == "deal_review" and st.session_state.uploaded_filenames:
-        batch_id = frozenset(st.session_state.uploaded_filenames)
-        # Step A — verify facts in the audit appendix, then confirm.
-        if batch_id not in st.session_state.aam_confirmed_batches:
-            _render_aam_gate(agent)
-            user_input = st.chat_input("Ask a follow-up question...")
-            _handle_chat_input(agent, user_input)
-            return
-        # Step B — facts are locked; generating the analysis is a separate,
-        # deliberate step (so confirm isn't one big jump into analysis).
-        if batch_id not in st.session_state.aam_analysis_requested:
-            _render_post_confirm(agent)
-            user_input = st.chat_input("Ask a follow-up question...")
-            _handle_chat_input(agent, user_input)
-            return
-    else:
-        # Legacy path (perf_vs_plan etc.): ingest on upload.
-        # Phase 1: ingest any new files (queues manual-override candidates).
-        if new_files:
-            _ingest_new_files(new_files)
+    # Phase 1: ingest any new files (queues manual-override candidates).
+    if new_files:
+        _ingest_new_files(new_files)
 
-        # Phase 2: if files need manual classification, show the override form
-        # and stop — we can't run the scenario until layers are resolved.
-        if st.session_state.get("pending_overrides"):
-            _render_manual_override_ui()
-            # Still allow follow-up Q&A while waiting on overrides
-            user_input = st.chat_input("Ask a follow-up question...")
-            _handle_chat_input(agent, user_input)
-            return
+    # Phase 2: if files need manual classification, show the override form and
+    # stop — we can't run the scenario until layers are resolved.
+    if st.session_state.get("pending_overrides"):
+        _render_manual_override_ui()
+        user_input = st.chat_input("Ask a follow-up question...")
+        _handle_chat_input(agent, user_input)
+        return
 
     # Phase 3: run the scenario if we haven't already for this batch.
     if st.session_state.uploaded_filenames:
@@ -683,58 +688,350 @@ def render_scenario() -> None:
         if batch_id not in st.session_state.completed_batches:
             _run_scenario_for_batch(agent, scenario_key)
 
-    # Deep-dive buttons — only show for deal_review scenario after the memo is generated
-    if (
-        scenario_key == "deal_review"
-        and st.session_state.uploaded_filenames
-        and frozenset(st.session_state.uploaded_filenames) in st.session_state.completed_batches
-    ):
-        _render_deep_dive_buttons(agent)
-
     # User chat input — this is where the agent earns its keep (Q&A).
     user_input = st.chat_input("Ask a follow-up question...")
     _handle_chat_input(agent, user_input)
 
 
-def _render_deep_dive_buttons(agent: AgentSession) -> None:
-    """Render the 5 deep-dive buttons above the chat input."""
-    st.markdown(
-        '<div style="margin-top:8px; font-size:11px; color:#6b7280; '
-        'text-transform:uppercase; letter-spacing:0.06em;">Drill into a section</div>',
-        unsafe_allow_html=True,
+# =============================================================================
+# Deal Analyzer — 3-column workspace (process | Outcome | Chat)
+# =============================================================================
+
+_DEEP_DIVE_SPECS = [
+    ("capital_structure", "Capital Structure"),
+    ("cash_flow",         "Cash Flow / NOI"),
+    ("return_profile",    "Return Profile"),
+    ("capex_plan",        "CapEx Plan"),
+    ("key_risks",         "Key Risks"),
+]
+
+_REPORT_SYSTEM = (
+    "You are a real estate analyst writing the final deal memo. You are given the "
+    "verified facts, the snapshot, and the analyses the user chose to keep. "
+    "Memorialize them into one clean, well-structured markdown report. Use ONLY "
+    "the content provided — do not invent figures. Keep section headings; tighten "
+    "prose; remove redundancy. This report is the deal's source of truth."
+)
+
+
+def _render_deal_analyzer(agent: AgentSession) -> None:
+    """Three-column Deal Analyzer: process controls | Outcome | Chat."""
+    import datetime as _dt
+
+    hl, hr = st.columns([4, 1])
+    with hl:
+        st.markdown(
+            f'<div class="da-header"><span class="da-title">Deal Analyzer</span>'
+            f'<span class="da-date">Date: {_dt.date.today():%Y-%m-%d}</span></div>',
+            unsafe_allow_html=True,
+        )
+    with hr:
+        st.button("← Back to scenarios", on_click=_back_to_landing, width="stretch")
+    st.divider()
+
+    files = st.session_state.uploaded_filenames
+    batch_id = frozenset(files) if files else None
+    confirmed = bool(batch_id) and batch_id in st.session_state.aam_confirmed_batches
+    analysis_req = bool(batch_id) and batch_id in st.session_state.aam_analysis_requested
+
+    left, mid, right = st.columns([1.1, 2.3, 1.5], gap="large")
+
+    # Render the middle FIRST so the editable appendix is captured before the
+    # left column's Proceed button needs it (Streamlit places output by column,
+    # not by execution order, so visual order stays left | mid | right).
+    with mid:
+        gate_edited = _render_outcome_column(agent, batch_id, confirmed, analysis_req)
+    with left:
+        _render_process_column(agent, files, batch_id, confirmed, analysis_req, gate_edited)
+    with right:
+        _render_chat_column(agent)
+
+    with st.expander("📂 SSOT — Asset record (debug)", expanded=False):
+        _ssot_panel()
+
+
+def _render_process_column(
+    agent: AgentSession, files, batch_id, confirmed: bool,
+    analysis_req: bool, gate_edited,
+) -> None:
+    """Left column: file upload, progress, and the workflow-advance buttons."""
+    st.markdown('<div class="da-col-title">Input &amp; analysis</div>', unsafe_allow_html=True)
+
+    uploaded = st.file_uploader(
+        "Upload workbook", type=["xlsx", "xlsm"],
+        accept_multiple_files=True, key="da_upload",
     )
-    cols = st.columns(5)
-    button_specs = [
-        ("capital_structure", "Capital Structure"),
-        ("cash_flow",         "Cash Flow / NOI"),
-        ("return_profile",    "Return Profile"),
-        ("capex_plan",        "CapEx Plan"),
-        ("key_risks",         "Key Risks"),
+    if uploaded:
+        current = {f.name for f in uploaded}
+        if current != st.session_state.uploaded_filenames:
+            for uf in uploaded:
+                if uf.name not in st.session_state.uploaded_filenames:
+                    (UPLOAD_DIR / uf.name).write_bytes(uf.getbuffer())
+            st.session_state.uploaded_filenames = current
+            st.rerun()
+
+    # Progress checklist
+    st.markdown("**Progress**")
+    steps = [
+        ("File uploaded",        bool(files)),
+        ("AAM verified",         confirmed),
+        ("Snapshot generated",   bool(st.session_state.snapshot_md)),
+        (f"Analyses ({len(st.session_state.outcome_findings)})",
+                                 bool(st.session_state.outcome_findings)),
+        ("Report complete",      bool(st.session_state.final_report_md)),
     ]
-    for i, (key, label) in enumerate(button_specs):
-        with cols[i]:
-            if st.button(label, key=f"dd_{key}", width="stretch"):
-                _run_deep_dive(agent, key, label)
+    for label, done in steps:
+        st.markdown(f"{'✅' if done else '⬜'} {label}")
+    st.divider()
+
+    if not batch_id:
+        st.caption("Upload a workbook to begin.")
+        return
+
+    if not confirmed:
+        st.caption("Verify the facts in the Outcome panel, then:")
+        if st.button("✅ Proceed — confirm facts", type="primary", width="stretch",
+                     disabled=gate_edited is None):
+            _confirm_aam_and_ingest(
+                agent, _collect_verified(st.session_state.aam_records, gate_edited)
+            )
+        return
+
+    if not analysis_req:
+        if st.button("📝 Run analysis (Snapshot)", type="primary", width="stretch"):
+            st.session_state.aam_analysis_requested.add(batch_id)
+            st.rerun()
+        return
+
+    # Analysis stage — deep-dive buttons. Results land in Chat, then Add to Outcome.
+    st.caption("Drill into a section — results appear in Chat:")
+    for key, label in _DEEP_DIVE_SPECS:
+        if st.button(label, key=f"dd_{key}", width="stretch"):
+            _run_deep_dive(agent, key, label)
+
+
+def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analysis_req: bool):
+    """
+    Middle column: the Outcome. Before confirm it's the editable AAM appendix
+    (returned so the Proceed button can read it). After confirm it's the locked
+    AAM summary + Snapshot + folded findings + final report. Whatever lands here
+    is what becomes the SSOT when the report is generated.
+    """
+    st.markdown('<div class="da-col-title">Outcome</div>', unsafe_allow_html=True)
+
+    if not batch_id:
+        st.info("Upload an underwriting workbook (left) to begin.")
+        return None
+
+    if not confirmed:
+        return _render_aam_appendix(batch_id)
+
+    _render_aam_summary()
+
+    if analysis_req:
+        _ensure_snapshot_generated(agent)
+    if st.session_state.snapshot_md:
+        with st.container(border=True):
+            st.markdown("#### Snapshot")
+            st.markdown(st.session_state.snapshot_md)
+
+    for f in st.session_state.outcome_findings:
+        with st.container(border=True):
+            htxt, hbtn = st.columns([8, 1])
+            htxt.markdown(f"#### {f['title']}")
+            if hbtn.button("✕", key=f"rm_{f['id']}", help="Remove from Outcome"):
+                st.session_state.outcome_findings = [
+                    x for x in st.session_state.outcome_findings if x["id"] != f["id"]
+                ]
+                st.session_state.outcome_added.discard(f["id"])
+                st.rerun()
+            st.markdown(f["content"])
+
+    if st.session_state.final_report_md:
+        with st.container(border=True):
+            st.markdown("#### 📄 Final Report — SSOT")
+            st.markdown(st.session_state.final_report_md)
+
+    return None
+
+
+def _render_aam_summary() -> None:
+    """Locked, verified AAM facts read back from the SSOT (post-confirm)."""
+    import aam
+    import pandas as pd
+    from metric_catalog import load_metric_catalog
+
+    bm = ((ssot.load_ssot().get("layers", {}) or {})
+          .get("underwriting", {}) or {}).get("bounded_metrics", {}) or {}
+    name_by_id = {m["metric_id"]: m["metric_name"] for m in load_metric_catalog()}
+
+    rows = []
+    for mid in aam.AAM_METRIC_IDS:
+        rec = bm.get(name_by_id.get(mid, ""))
+        if not rec:
+            continue
+        rows.append({
+            "Group":  aam.group_of(mid) or "",
+            "Metric": rec.get("metric_name", mid),
+            "Value":  rec.get("display_value") or "—",
+        })
+    with st.container(border=True):
+        st.markdown("#### AAM Summary — verified facts")
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        else:
+            st.caption("No verified AAM facts in the SSOT yet.")
+
+
+def _ensure_snapshot_generated(agent: AgentSession) -> None:
+    """Generate the Snapshot once (post-confirm) and store it for the Outcome."""
+    if st.session_state.snapshot_md is not None:
+        return
+    batch_id = frozenset(st.session_state.uploaded_filenames)
+    if batch_id in st.session_state.completed_batches:
+        return
+    with st.spinner("Generating Snapshot…"):
+        readiness = tools.check_scenario_ready("deal_review")
+        if not readiness.get("ready"):
+            st.warning(readiness.get("reason", "Not enough data for the Snapshot yet."))
+            st.session_state.completed_batches.add(batch_id)
+            return
+        result = tools.run_deal_review()
+    st.session_state.completed_batches.add(batch_id)
+    if "error" in result:
+        st.error(f"Couldn't generate the Snapshot: {result['error']}")
+        return
+    st.session_state.snapshot_md = result.get("narrative", "")
+
+
+def _finding_sig(content: str) -> str:
+    return str(abs(hash(content.strip())))[:10]
+
+
+def _finding_title(content: str) -> str:
+    """Pull a short title from a finding: first markdown heading, else first line."""
+    for line in content.strip().splitlines():
+        s = line.strip().lstrip("#").strip()
+        if s:
+            return s[:60]
+    return "Finding"
+
+
+def _fold_to_outcome(content: str) -> None:
+    sig = _finding_sig(content)
+    st.session_state.outcome_findings.append({
+        "id": sig, "title": _finding_title(content), "content": content,
+    })
+    st.session_state.outcome_added.add(sig)
+
+
+def _render_chat_column(agent: AgentSession) -> None:
+    """Right column: chat transcript with Add-to-Outcome, a chat form, and the
+    Generate Report action that memorializes the Outcome as the SSOT."""
+    st.markdown('<div class="da-col-title">Chat</div>', unsafe_allow_html=True)
+
+    msgs = list(agent.display_messages())
+    with st.container(height=420):
+        if not msgs:
+            st.caption("Ask a question or run an analysis — results appear here.")
+        for i, m in enumerate(msgs):
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+                if m["role"] == "assistant":
+                    sig = _finding_sig(m["content"])
+                    if sig in st.session_state.outcome_added:
+                        st.caption("✓ in Outcome")
+                    elif st.button("➕ Add to Outcome", key=f"add_{i}_{sig}"):
+                        _fold_to_outcome(m["content"])
+                        st.rerun()
+
+    with st.form("da_chat", clear_on_submit=True):
+        txt = st.text_area(
+            "Ask", height=70, label_visibility="collapsed",
+            placeholder="Ask a follow-up question…",
+        )
+        sent = st.form_submit_button("Send", type="primary", width="stretch")
+    if sent and txt.strip():
+        try:
+            with st.spinner("Thinking…"):
+                agent.send(txt.strip())
+        except Exception as e:
+            st.error(f"Chat failed: {e}")
+        st.rerun()
+
+    st.divider()
+    can_report = bool(st.session_state.snapshot_md or st.session_state.outcome_findings)
+    if st.button("📄 Generate Report → SSOT", width="stretch", disabled=not can_report,
+                 help="Memorialize the Outcome into a report and save it as the SSOT."):
+        _generate_report()
+        st.rerun()
+
+
+def _generate_report() -> None:
+    """Memorialize the Outcome (verified facts + snapshot + findings) into one
+    report via GPT (deterministic concat fallback) and persist it as the SSOT."""
+    import aam
+    from metric_catalog import load_metric_catalog
+
+    bm = ((ssot.load_ssot().get("layers", {}) or {})
+          .get("underwriting", {}) or {}).get("bounded_metrics", {}) or {}
+    name_by_id = {m["metric_id"]: m["metric_name"] for m in load_metric_catalog()}
+
+    parts: list[str] = []
+    fact_lines = []
+    for mid in aam.AAM_METRIC_IDS:
+        rec = bm.get(name_by_id.get(mid, ""))
+        if rec and (rec.get("display_value") not in (None, "—")):
+            fact_lines.append(f"- {rec.get('metric_name', mid)}: {rec.get('display_value')}")
+    if fact_lines:
+        parts.append("## Verified Facts (AAM)\n" + "\n".join(fact_lines))
+    if st.session_state.snapshot_md:
+        parts.append("## Snapshot\n" + st.session_state.snapshot_md)
+    for f in st.session_state.outcome_findings:
+        parts.append(f"## {f['title']}\n{f['content']}")
+    raw = "\n\n".join(parts)
+
+    report = raw
+    try:
+        from scenarios._llm import client, MODEL_FAST, llm_available
+        if llm_available() and raw.strip():
+            with st.spinner("Memorializing the Outcome into a report…"):
+                resp = client.chat.completions.create(
+                    model=MODEL_FAST, temperature=0.2,
+                    messages=[
+                        {"role": "system", "content": _REPORT_SYSTEM},
+                        {"role": "user",   "content": raw},
+                    ],
+                )
+                report = resp.choices[0].message.content.strip()
+    except Exception as e:
+        st.caption(f"(Report polish skipped, using raw Outcome: {e})")
+
+    st.session_state.final_report_md = report
+    # Whatever ends up in the Outcome becomes the SSOT — persist the report.
+    try:
+        s = ssot.load_ssot()
+        lyr = s.setdefault("layers", {}).setdefault("underwriting", {})
+        lyr["deal_report"] = report
+        ssot.save_ssot(s)
+        st.toast("Report generated and saved to the SSOT.")
+    except Exception as e:
+        st.caption(f"(Saved to view; SSOT write skipped: {e})")
 
 
 def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
-    """Execute a deep-dive scenario and seed the result into the chat history."""
+    """Run a deep-dive and append it to the chat transcript (right column), where
+    the user can fold it into the Outcome. No inline render — a rerun shows it."""
     from scenarios.deep_dives import run_deep_dive
 
-    pseudo_user_msg = f"📊 {label} deep dive"
-    with st.chat_message("user"):
-        st.markdown(pseudo_user_msg)
-    with st.chat_message("assistant"):
-        with st.spinner(f"Generating {label}..."):
-            result = run_deep_dive(key)
-        if "error" in result:
-            st.error(result["error"])
-            return
-        st.markdown(result["narrative"])
-
-    # Seed into agent message history so follow-up Q&A can reference it
-    agent.messages.append({"role": "user",      "content": pseudo_user_msg})
+    with st.spinner(f"Generating {label}…"):
+        result = run_deep_dive(key)
+    if "error" in result:
+        st.error(result["error"])
+        return
+    agent.messages.append({"role": "user",      "content": f"📊 {label}"})
     agent.messages.append({"role": "assistant", "content": result["narrative"]})
+    st.rerun()
 
 
 def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:
@@ -982,25 +1279,16 @@ def _rederive_noi_from_verified(records: dict, verified: dict) -> None:
         }
 
 
-def _render_aam_gate(agent: AgentSession) -> None:
-    """
-    Render the Audit Appendix + verification gate. Blocks analysis until the
-    user confirms. On confirm, runs the full ingest and applies verified values.
-    """
-    import aam
-    import pandas as pd
-
+def _ensure_aam_extracted() -> dict:
+    """Extract the AAM once per batch (deterministic, fast, free) and return the
+    records dict. GPT fires only on the explicit blank-fill action."""
     batch_id = frozenset(st.session_state.uploaded_filenames)
-
-    # Extract AAM once per batch — DETERMINISTIC ONLY (fast, free). GPT fires
-    # only when the user clicks "Fill blanks with GPT" (bulk-fill, then review).
     if st.session_state.aam_batch_id != batch_id or not st.session_state.aam_records:
         primary = sorted(st.session_state.uploaded_filenames)[0]
         with st.status(f"Reading audit-appendix metrics from {primary}…", expanded=False):
             from aam_extractor import extract_aam
             st.session_state.aam_records = extract_aam(UPLOAD_DIR / primary, use_gpt_gap_fill=False)
-            # Tag flow metrics with their table's periodicity so the human sees
-            # "NOI — monthly" while verifying. Parse is cached (paid once/file).
+            # Tag flow metrics with their table's periodicity (cached parse).
             try:
                 from financial_model_parser import parse_workbook_tables_cached, tag_metric_periodicity
                 tag_metric_periodicity(
@@ -1011,14 +1299,24 @@ def _render_aam_gate(agent: AgentSession) -> None:
                 pass
         st.session_state.aam_batch_id = batch_id
         st.session_state.aam_fill_version = 0
+    return st.session_state.aam_records
 
-    records = st.session_state.aam_records
 
-    st.markdown("### 📋 Audit Appendix — verify before analysis")
+def _render_aam_appendix(batch_id) -> "pd.DataFrame":
+    """
+    Render the editable Audit Appendix table (the AAM summary being verified)
+    plus the GPT blank-fill action. Returns the edited DataFrame so the caller
+    (the left-column Proceed button) can collect the human's verified values.
+    The confirm/proceed action lives in the process column, not here.
+    """
+    import aam
+    import pandas as pd
+
+    records = _ensure_aam_extracted()
+
     st.caption(
-        "These are the core facts Collie extracted. Review each value and its "
-        "source, correct anything wrong in the **Value** column, then confirm to "
-        "run the analysis. Blank rows can be left as-is, or filled with GPT below."
+        "Core facts Collie extracted — verify each value and its source, correct "
+        "anything wrong in the **Value** column, then Proceed (left)."
     )
 
     rows = []
@@ -1028,7 +1326,7 @@ def _render_aam_gate(agent: AgentSession) -> None:
             continue
         source = _aam_source(rec)
         if rec.get("_via_aam_gpt") and source != "—":
-            source = f"🤖 {source}"  # value came from the focused GPT read
+            source = f"🤖 {source}"
         rows.append({
             "Group":   aam.group_of(mid) or "",
             "Metric":  rec.get("metric_name", mid),
@@ -1057,22 +1355,18 @@ def _render_aam_gate(agent: AgentSession) -> None:
         counts[r["Status"]] = counts.get(r["Status"], 0) + 1
     st.caption("Status — " + " · ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
 
-    # --- Bulk GPT blank-fill (step 4): one focused call over the gaps ---------
     n_blanks = sum(counts.get(s, 0) for s in ("missing", "candidate_pool", "suspicious"))
-    fill_col, confirm_col = st.columns([1, 1])
-    with fill_col:
-        from scenarios._llm import llm_available
-        if not llm_available():
-            st.button("🤖 Fill blanks with GPT", disabled=True, width="stretch",
-                      help="Set OPENAI_API_KEY to enable GPT blank-fill.")
-        elif n_blanks == 0:
-            st.button("🤖 Fill blanks with GPT", disabled=True, width="stretch",
-                      help="No blanks to fill — every AAM field resolved.")
-        elif st.button(f"🤖 Fill {n_blanks} blank(s) with GPT", width="stretch"):
-            _fill_aam_blanks(records)
-    with confirm_col:
-        if st.button("✅ Confirm verified facts", type="primary", width="stretch"):
-            _confirm_aam_and_ingest(agent, _collect_verified(records, edited))
+    from scenarios._llm import llm_available
+    if not llm_available():
+        st.button("🤖 Fill blanks with GPT", disabled=True, width="stretch",
+                  help="Set OPENAI_API_KEY to enable GPT blank-fill.")
+    elif n_blanks == 0:
+        st.button("🤖 Fill blanks with GPT", disabled=True, width="stretch",
+                  help="No blanks to fill — every AAM field resolved.")
+    elif st.button(f"🤖 Fill {n_blanks} blank(s) with GPT", width="stretch"):
+        _fill_aam_blanks(records)
+
+    return edited
 
 
 def _fill_aam_blanks(records: dict) -> None:
@@ -1167,29 +1461,6 @@ def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
 
     st.session_state.aam_confirmed_batches.add(batch_id)
     st.rerun()
-
-
-def _render_post_confirm(agent: AgentSession) -> None:
-    """
-    Staging step between 'facts confirmed' and 'analysis generated' so the
-    confirm click isn't one big jump. Shows a locked-facts summary and a
-    separate, deliberate 'generate' button.
-    """
-    batch_id = frozenset(st.session_state.uploaded_filenames)
-    uw = ssot.load_ssot().get("layers", {}).get("underwriting", {}) or {}
-    bm = uw.get("bounded_metrics", {}) or {}
-    n_verified = sum(1 for r in bm.values() if r.get("human_verified"))
-    n_traced = sum(1 for r in bm.values() if r.get("traced"))
-
-    st.success(
-        f"✅ Facts confirmed and locked — **{n_verified}** human-verified, "
-        f"**{n_traced}** reached via formula trace. SSOT is the source of truth "
-        f"for this deal."
-    )
-    st.caption("Next is a separate step: generate the Snapshot and on-demand analyses.")
-    if st.button("📝 Generate Snapshot & analyses →", type="primary", width="stretch"):
-        st.session_state.aam_analysis_requested.add(batch_id)
-        st.rerun()
 
 
 def _run_scenario_for_batch(agent: AgentSession, scenario_key: str) -> None:

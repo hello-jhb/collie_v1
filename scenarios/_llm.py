@@ -8,6 +8,7 @@ import os
 import sys
 import streamlit as st
 from openai import OpenAI
+from typing import Any
 
 # Logger that writes to stdout so messages appear in Streamlit Cloud logs.
 log = logging.getLogger("fb.llm")
@@ -26,22 +27,62 @@ def _get_api_key() -> str | None:
     return key or os.getenv("OPENAI_API_KEY")
 
 
-_api_key = _get_api_key()
-client: OpenAI | None = OpenAI(api_key=_api_key) if _api_key else None
+_client: OpenAI | None = None
+_client_api_key: str | None = None
+
+
+def get_client() -> OpenAI | None:
+    """
+    Return a live OpenAI client for the current Streamlit run.
+
+    Streamlit re-executes app modules on rerun, while helper modules imported by
+    other modules can stay cached. A client created once at import time can
+    therefore get stuck as None if secrets/env were temporarily unavailable, or
+    keep using an old key after a reconnect. Resolve it lazily instead.
+    """
+    global _client, _client_api_key
+
+    api_key = _get_api_key()
+    if not api_key:
+        _client = None
+        _client_api_key = None
+        return None
+
+    if _client is None or api_key != _client_api_key:
+        _client = OpenAI(api_key=api_key)
+        _client_api_key = api_key
+    return _client
+
+
+class _ClientProxy:
+    """Compatibility shim for modules that imported `client` directly."""
+
+    def __bool__(self) -> bool:
+        return get_client() is not None
+
+    def __getattr__(self, name: str) -> Any:
+        live_client = get_client()
+        if live_client is None:
+            raise RuntimeError("OPENAI_API_KEY not set in environment or Streamlit secrets")
+        return getattr(live_client, name)
+
+
+client = _ClientProxy()
 
 MODEL       = "gpt-4o"
 MODEL_FAST  = "gpt-4o-mini"   # used for ingest-time insight pass (cost-sensitive)
 
 
 def llm_available() -> bool:
-    return client is not None
+    return get_client() is not None
 
 
 def complete(system: str, user: str, temperature: float = 0.2) -> str:
     """Single chat completion. Returns the assistant text."""
-    if client is None:
+    live_client = get_client()
+    if live_client is None:
         return "[LLM unavailable — set OPENAI_API_KEY environment variable]"
-    response = client.chat.completions.create(
+    response = live_client.chat.completions.create(
         model=MODEL,
         temperature=temperature,
         messages=[

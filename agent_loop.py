@@ -17,37 +17,10 @@ Public API:
 from __future__ import annotations
 
 import json
-import os
-import streamlit as st
 from typing import Any, Iterable
 
-from openai import OpenAI
-
 import tools
-
-
-# -----------------------------------------------------------------------------
-# OpenAI client
-# -----------------------------------------------------------------------------
-
-def _get_api_key() -> str | None:
-    try:
-        key = st.secrets.get("OPENAI_API_KEY", None)
-    except Exception:
-        key = None
-    return key or os.getenv("OPENAI_API_KEY")
-
-
-_client: OpenAI | None = None
-
-
-def _get_client() -> OpenAI | None:
-    global _client
-    if _client is None:
-        key = _get_api_key()
-        if key:
-            _client = OpenAI(api_key=key)
-    return _client
+from scenarios._llm import get_client
 
 
 # Routing model: handles "which tool to call next" decisions during follow-up
@@ -218,7 +191,7 @@ class AgentSession:
         self.last_tool_calls = []
         self.last_error = None
 
-        client = _get_client()
+        client = get_client()
         if client is None:
             self.last_error = "OPENAI_API_KEY not set."
             return f"⚠️ {self.last_error}"

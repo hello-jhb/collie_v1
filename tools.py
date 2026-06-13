@@ -892,16 +892,28 @@ def ingest_to_ssot_with_layer(
     )
 
     # --- Pass 1: deterministic metric extraction (legacy single-best-match path)
-    t0 = time.time()
-    extraction = extract_from_file(filename, layer=layer)
-    t_pass1 = time.time() - t0
-    if "error" in extraction:
-        return extraction
-
-    _log.info(
-        "INGEST %s — Pass 1 done in %.1fs (%d metrics found, llm=%s)",
-        filename, t_pass1, extraction["extracted_count"], llm_available(),
-    )
+    # RETIRED for the underwriting layer (2026-06-12): the bounded pipeline +
+    # audit gate is the extraction engine there, and layer["metrics"] is
+    # synthesized from the bounded records below — same shape, one engine,
+    # no second full-catalog scan of the whole workbook. Other layers
+    # (actuals_*, business_plan) keep the legacy scan: perf_vs_plan reads
+    # layer metrics that the bounded checklist doesn't cover for actuals.
+    extraction: dict[str, Any] | None = None
+    if layer != "underwriting":
+        t0 = time.time()
+        extraction = extract_from_file(filename, layer=layer)
+        t_pass1 = time.time() - t0
+        if "error" in extraction:
+            return extraction
+        _log.info(
+            "INGEST %s — Pass 1 done in %.1fs (%d metrics found, llm=%s)",
+            filename, t_pass1, extraction["extracted_count"], llm_available(),
+        )
+    else:
+        _log.info(
+            "INGEST %s — Pass 1 legacy scan SKIPPED (underwriting: bounded "
+            "pipeline is the extraction engine)", filename,
+        )
 
     # --- Phase 1 bounded-metric extraction (schema-validated candidate ranking)
     # Runs alongside the legacy path so both old and new SSOT consumers work.
@@ -926,7 +938,14 @@ def ingest_to_ssot_with_layer(
     # --- Pass 2: targeted GPT gap-fill + surface insights ---
     raw_insights: dict[str, Any] | None = None
     if llm_available():
-        found_names = [m["metric_name"] for m in extraction["metrics"]]
+        if extraction is not None:
+            found_names = [m["metric_name"] for m in extraction["metrics"]]
+        else:
+            found_names = [
+                n for n, r in bounded_metrics.items()
+                if r.get("status") in _PREFILL_STATUSES
+                and r.get("normalized_value") is not None
+            ]
         fields_to_find = _build_fields_to_find(layer, found_names)
 
         t0 = time.time()
@@ -991,11 +1010,31 @@ def ingest_to_ssot_with_layer(
         except Exception as e:
             _log.error("Comprehension review failed for %s: %s", filename, e)
 
+    # Layer metrics: legacy Pass-1 output where it ran; otherwise synthesized
+    # from the (now reconciled) bounded records — same shape, so every
+    # downstream consumer (get_layer_details, profiles, calculations,
+    # provenance) keeps working off canonical catalog names.
+    if extraction is not None:
+        layer_metrics = extraction["metrics"]
+    else:
+        layer_metrics = [
+            {
+                "metric_name": name,
+                "value":       r.get("normalized_value"),
+                "sheet":       r.get("source_sheet"),
+                "value_cell":  r.get("source_cell"),
+                "confidence":  r.get("status"),
+            }
+            for name, r in bounded_metrics.items()
+            if r.get("normalized_value") is not None
+            and r.get("status") in _PREFILL_STATUSES
+        ]
+
     # Write both passes + bounded metrics to SSOT (sheet inventory included so
     # the agent can see which sheets exist but were intentionally not bulk-extracted)
     ssot.write_layer(
         layer=layer,
-        metrics=extraction["metrics"],
+        metrics=layer_metrics,
         source_file=filename,
         raw_insights=raw_insights,
         sheet_inventory=sheet_inventory,
@@ -1055,9 +1094,9 @@ def ingest_to_ssot_with_layer(
     return {
         "filename":             filename,
         "layer":                layer,
-        "metric_count":         extraction["extracted_count"],
-        "scanned_count":        extraction.get("scanned_count", extraction["extracted_count"]),
-        "catalog_size":         extraction["catalog_size"],
+        "metric_count":         len(layer_metrics),
+        "scanned_count":        (extraction or {}).get("scanned_count", len(bounded_metrics)),
+        "catalog_size":         (extraction or {}).get("catalog_size", len(bounded_metrics)),
         "layers_now_present":   ssot.list_layers(),
         "calculated":           calc_result["computed"],
         "insight_pass":         "completed" if raw_insights else "skipped (no API key)",

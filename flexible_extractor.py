@@ -956,16 +956,20 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
 
     Capped at max_pairs. Priority sheets (summary, assumptions, waterfall) come first.
     """
-    # Do NOT use read_only — find_nearby_value does random cell access which
-    # is catastrophically slow in read_only mode (every ws.cell(row,col) call
-    # requires a file seek). Same fix as in scan_workbook_for_all_metrics.
+    # Grid path: ONE read-only sweep materializes the non-skip sheets into
+    # bounded in-memory grids. find_nearby_value's random cell access runs
+    # against the grids (read_only worksheets would be catastrophically slow
+    # for that), and the full openpyxl load (styles/links, every sheet) is
+    # avoided entirely.
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
+        all_names, grids = _load_grid_sheets(
+            file_path, lambda n: sheet_priority_tier(n) != 99
+        )
     except Exception:
         return []
 
     # Use the centralized priority taxonomy — skip-tier sheets are excluded entirely
-    sorted_sheets = sorted_sheets_by_priority(wb.sheetnames, exclude_skipped=True)
+    sorted_sheets = sorted_sheets_by_priority(all_names, exclude_skipped=True)
 
     pairs = []
     seen_labels: set[str] = set()
@@ -973,7 +977,9 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
     for sheet_name in sorted_sheets:
         if len(pairs) >= max_pairs:
             break
-        ws = wb[sheet_name]
+        ws = grids.get(sheet_name)
+        if ws is None:
+            continue
         tier = sheet_priority_tier(sheet_name)
 
         # Bound iteration per sheet — needed for huge models
@@ -1010,11 +1016,6 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
                     "direction":  direction,
                     "label_len":  len(cell_text),
                 })
-
-    try:
-        wb.close()
-    except Exception:
-        pass
 
     return pairs
 

@@ -643,6 +643,87 @@ def scan_workbook_for_all_metrics(file_path, catalog):
 EXTRACTOR_VERSION = "phase1_5a.v1"
 
 
+# Scan margin beyond the label window: find_nearby_value reaches up to 10
+# columns right / 6 rows below a label, so the materialized grid extends past
+# the label bounds to keep grid-path results identical to the full-load path.
+_GRID_COL_MARGIN = 10
+_GRID_ROW_MARGIN = 6
+
+
+class _GridCell:
+    """Minimal cell shim over a materialized value grid (read-only)."""
+    __slots__ = ("value", "row", "column")
+
+    def __init__(self, value, row, column):
+        self.value, self.row, self.column = value, row, column
+
+    @property
+    def coordinate(self):
+        return cell_address(self.row, self.column)
+
+
+class _GridSheet:
+    """
+    Bounded in-memory sheet backed by ONE read-only sweep. Supports the two
+    access patterns the scan uses — iter_rows() and random cell() — without
+    paying openpyxl's full (styles/links) workbook load. Cells outside the
+    materialized window read as None, same as empty cells.
+    """
+    def __init__(self, rows: list[tuple]):
+        self._rows = rows
+
+    def cell(self, row: int, column: int) -> _GridCell:
+        try:
+            v = self._rows[row - 1][column - 1] if row >= 1 and column >= 1 else None
+        except IndexError:
+            v = None
+        return _GridCell(v, row, column)
+
+    def iter_rows(self, min_row=1, max_row=None, min_col=1, max_col=None):
+        last_row = min(max_row or len(self._rows), len(self._rows))
+        for r in range(min_row, last_row + 1):
+            vals = self._rows[r - 1]
+            hi = max_col or len(vals)
+            yield tuple(
+                _GridCell(vals[c - 1] if c - 1 < len(vals) else None, r, c)
+                for c in range(min_col, hi + 1)
+            )
+
+
+def _load_grid_sheets(file_path, keep) -> tuple[list[str], dict[str, _GridSheet]]:
+    """
+    Materialize ONLY the sheets `keep(name)` accepts, via a read-only sweep
+    (values_only). Returns (all sheet names in workbook order, {name:
+    _GridSheet}). On a 100-sheet workbook where the tier map whitelists a
+    handful, this replaces the full openpyxl load (every sheet, styles, links)
+    with seconds of work.
+    """
+    wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+    names = list(wb.sheetnames)
+    grids: dict[str, _GridSheet] = {}
+    for name in names:
+        if not keep(name):
+            continue
+        try:
+            ws = wb[name]
+            rows = [
+                tuple(row)
+                for row in ws.iter_rows(
+                    min_row=1, max_row=_MAX_ROWS_PER_SHEET + _GRID_ROW_MARGIN,
+                    min_col=1, max_col=_MAX_COLS_PER_SHEET + _GRID_COL_MARGIN,
+                    values_only=True,
+                )
+            ]
+            grids[name] = _GridSheet(rows)
+        except Exception:
+            continue  # chartsheets etc. — skip, same as an unreadable sheet
+    try:
+        wb.close()
+    except Exception:
+        pass
+    return names, grids
+
+
 def scan_workbook_for_candidates(file_path, catalog, sheet_tier_map: dict | None = None):
     """
     Find ALL candidate matches per metric across the workbook.
@@ -657,8 +738,25 @@ def scan_workbook_for_candidates(file_path, catalog, sheet_tier_map: dict | None
         {metric_id, metric_name, category, value, source_file, sheet, sheet_tier,
          label_cell, value_cell, matched_alias, confidence, label_ratio, match_method}
     """
+    def _tier_for(name: str) -> int:
+        if sheet_tier_map and name in sheet_tier_map:
+            return sheet_tier_map[name]
+        return sheet_priority_tier(name)
+
+    # FAST PATH (tier map supplied, e.g. Workbook Orientation): materialize only
+    # the non-skipped sheets via one read-only sweep instead of paying the full
+    # openpyxl load for every sheet in the workbook. Identical scan semantics —
+    # _GridSheet mirrors iter_rows/cell over the same bounded window.
+    wb = None
+    grids: dict[str, _GridSheet] | None = None
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
+        if sheet_tier_map is not None:
+            all_names, grids = _load_grid_sheets(
+                file_path, lambda n: _tier_for(n) != 99
+            )
+        else:
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            all_names = list(wb.sheetnames)
     except Exception:
         return {m["metric_id"]: [] for m in catalog}
 
@@ -672,14 +770,9 @@ def scan_workbook_for_candidates(file_path, catalog, sheet_tier_map: dict | None
     candidates_by_metric: dict = {m["metric_id"]: [] for m in catalog}
     file_name = Path(file_path).name
 
-    def _tier_for(name: str) -> int:
-        if sheet_tier_map and name in sheet_tier_map:
-            return sheet_tier_map[name]
-        return sheet_priority_tier(name)
-
     # Build candidate sheet list using effective tiers (skip tier-99), tier-ordered
     candidate_sheets = sorted(
-        [s for s in wb.sheetnames if _tier_for(s) != 99],
+        [s for s in all_names if _tier_for(s) != 99],
         key=_tier_for,
     )
 
@@ -690,7 +783,12 @@ def scan_workbook_for_candidates(file_path, catalog, sheet_tier_map: dict | None
         # Key UW Metrics both as 'summary' (same effective tier), the one-pager
         # NAME still wins over secondary summaries. See SHEET_PRIORITY_TIERS.
         name_tier = sheet_priority_tier(sheet_name)
-        ws = wb[sheet_name]
+        if grids is not None:
+            ws = grids.get(sheet_name)
+            if ws is None:
+                continue
+        else:
+            ws = wb[sheet_name]
 
         for row in ws.iter_rows(
             min_row=1, max_row=_MAX_ROWS_PER_SHEET,
@@ -762,10 +860,11 @@ def scan_workbook_for_candidates(file_path, catalog, sheet_tier_map: dict | None
             -x.get("label_ratio", 0),
         ))
 
-    try:
-        wb.close()
-    except Exception:
-        pass
+    if wb is not None:
+        try:
+            wb.close()
+        except Exception:
+            pass
 
     return candidates_by_metric
 

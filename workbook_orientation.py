@@ -313,17 +313,47 @@ def _score_sheet(sig: dict[str, Any], name_tier: int) -> dict[str, float]:
     return scores
 
 
-def orient_workbook(file_path: str | Path) -> dict[str, Any]:
+_ORIENT_CACHE_DIR = Path("cache/orientation")
+
+
+def _orient_cache_path(file_path: Path) -> Path | None:
+    """Disk-cache path for this file's orientation (sha256 + version keyed)."""
+    try:
+        from extraction_cache import file_sha256
+        import hashlib
+        key = hashlib.sha256(
+            f"{file_sha256(file_path)}|{ORIENTATION_VERSION}".encode()
+        ).hexdigest()
+        return _ORIENT_CACHE_DIR / f"{key}.json"
+    except Exception:
+        return None
+
+
+def orient_workbook(file_path: str | Path, use_cache: bool = True) -> dict[str, Any]:
     """
     Run Workbook Orientation. Deterministic, read-only, no GPT.
 
     Returns the workbook map described in the module docstring, or
     {"error": "..."} when the file can't be read (callers fall back to the
     existing name-based behavior).
+
+    Results are disk-cached by file hash + ORIENTATION_VERSION (orientation is
+    pure, so the same bytes always orient the same way) — re-uploads and
+    downstream re-orientations (Snapshot context) cost ~0 instead of seconds.
     """
+    import json
     import openpyxl
 
     file_path = Path(file_path)
+    cache_p = _orient_cache_path(file_path) if use_cache else None
+    if cache_p is not None and cache_p.exists():
+        try:
+            with open(cache_p) as fh:
+                cached = json.load(fh)
+            if cached.get("version") == ORIENTATION_VERSION and cached.get("sheets"):
+                return cached
+        except Exception:
+            pass  # corrupt cache → recompute
     try:
         wb_vals = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
         wb_form = openpyxl.load_workbook(file_path, data_only=False, read_only=True)
@@ -412,7 +442,15 @@ def orient_workbook(file_path: str | Path) -> dict[str, Any]:
         ", ".join(role_map["model"]) or "—",
         ", ".join(role_map["support"]) or "—",
     )
-    return {"version": ORIENTATION_VERSION, "sheets": result_sheets, "map": role_map}
+    result = {"version": ORIENTATION_VERSION, "sheets": result_sheets, "map": role_map}
+    if cache_p is not None:
+        try:
+            _ORIENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with open(cache_p, "w") as fh:
+                json.dump(result, fh)
+        except Exception:
+            pass  # cache write is best-effort
+    return result
 
 
 def render_sheets_text(

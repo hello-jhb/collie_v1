@@ -1627,10 +1627,22 @@ def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
     bar = st.progress(5, text="Ingesting workbook…")
     note = st.empty()
 
+    # The gate already resolved most checklist metrics for the PRIMARY file —
+    # hand those records to the ingest so it skips their section reads / GPT
+    # fallbacks instead of re-extracting what the human just verified.
+    primary = files[0] if files else None
+    gate_records = (
+        st.session_state.aam_records
+        if st.session_state.aam_batch_id == batch_id else None
+    )
+
     for i, fn in enumerate(files):
         bar.progress(5 + int(30 * (i / max(len(files), 1))), text=f"Ingesting {fn}…")
         note.caption(f"Classifying sheets and extracting the full metric checklist from {fn}.")
-        result = tools.ingest_to_ssot_with_layer(fn, "underwriting")
+        result = tools.ingest_to_ssot_with_layer(
+            fn, "underwriting",
+            prefilled_bounded=gate_records if fn == primary else None,
+        )
         if "error" in result:
             note.caption(f"{fn}: {result['error']}")
         else:

@@ -40,3 +40,5 @@ Thumbs.db
 
 # Phase 1 extraction cache (file-hash keyed; can be regenerated from source files)
 cache/extractions/
+# Workbook orientation cache (file-hash keyed; deterministic, regenerable)
+cache/orientation/

@@ -352,14 +352,26 @@ def _inventory_sheets_by_tier(file_path: Path) -> dict[str, Any]:
         }
 
 
+_PREFILL_STATUSES = ("verified", "candidate_pool", "derived", "inferred")
+
+
 def _run_bounded_extraction(
     file_path: Path,
     layer: str,
     sheet_classification: dict[str, dict] | None = None,
+    prefilled: dict[str, Any] | None = None,
 ) -> tuple[dict, str, bool]:
     """
     Phase 1 — extract the 25 bounded analyst-checklist metrics with schema
     validation and ranked candidate selection.
+
+    `prefilled` (Stage-1 gate records, keyed by metric_name): bounded metrics
+    that already resolved at the audit gate are ADOPTED instead of re-extracted
+    — their section reads, GPT fallbacks, and pool disambiguation are skipped.
+    The human just verified these values; re-deriving them is pure latency.
+    Results computed with a prefill are NOT disk-cached (they embed
+    session-specific gate state); the human's confirmations are applied on top
+    by apply_verified_aam either way.
 
     Returns:
       (bounded_metrics, cache_key, was_cache_hit)
@@ -368,6 +380,7 @@ def _run_bounded_extraction(
       cache_key:       the versioned cache key used (for diagnostics)
       was_cache_hit:   True if the result came from cache, False if computed
     """
+    import copy
     from metric_catalog import load_metric_catalog
 
     catalog = load_metric_catalog()
@@ -390,9 +403,28 @@ def _run_bounded_extraction(
         )
         return cached["bounded_metrics"], cache_key, True
 
+    # Adopt gate-resolved records; only the remainder runs the full pipeline.
+    pre: dict[str, Any] = {}
+    if prefilled:
+        for m in bounded:
+            rec = prefilled.get(m["metric_name"])
+            if (
+                rec
+                and rec.get("status") in _PREFILL_STATUSES
+                and rec.get("normalized_value") is not None
+            ):
+                r = copy.deepcopy(rec)
+                r["candidates"] = (r.get("candidates") or [])[:5]
+                r.setdefault("validation_notes", []).insert(
+                    0, "Adopted from the Stage-1 audit gate; re-extraction skipped."
+                )
+                pre[m["metric_name"]] = r
+        bounded = [m for m in bounded if m["metric_name"] not in pre]
+
     _log.info(
-        "BOUNDED-METRICS cache MISS for %s (key=%s) — running extraction on %d metrics",
-        file_path.name, cache_key[:12], len(bounded),
+        "BOUNDED-METRICS cache MISS for %s (key=%s) — running extraction on "
+        "%d metrics (%d adopted from gate)",
+        file_path.name, cache_key[:12], len(bounded), len(pre),
     )
 
     # Phase 2.5 — content-based sheet classification. Gives both a tier map
@@ -452,7 +484,7 @@ def _run_bounded_extraction(
     # structured tables and extract that section's checklist. Catalog defines
     # the objective; GPT navigates structure; validation happens per-record.
     section_results: dict[str, dict] = {}   # metric_name -> extraction dict
-    if classification and llm_available():
+    if classification and llm_available() and bounded:
         try:
             from section_reader import read_section, SECTION_ORDER, detect_workbook_units
             from sheet_classifier import nominate_authoritative_tabs
@@ -488,15 +520,20 @@ def _run_bounded_extraction(
             section_results = {}
 
     # === FALLBACK PATH — proximity candidates (only used where section fails) =
-    candidates_by_metric = scan_workbook_for_candidates(file_path, bounded, sheet_tier_map)
+    candidates_by_metric = (
+        scan_workbook_for_candidates(file_path, bounded, sheet_tier_map)
+        if bounded else {}
+    )
 
     import openpyxl
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
-        available_sheets = list(wb.sheetnames)
-        wb.close()
-    except Exception:
-        available_sheets = []
+    available_sheets: list = []
+    if bounded:
+        try:
+            wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+            available_sheets = list(wb.sheetnames)
+            wb.close()
+        except Exception:
+            available_sheets = []
 
     # === Build one record per metric: section reader first, proximity fallback =
     # The per-metric work is independent and the GPT fallback/resolver calls are
@@ -557,25 +594,31 @@ def _run_bounded_extraction(
             bounded_metrics[name] = record
 
     _log.info(
-        "BOUNDED-METRICS for %s — %d via section reader, %d via GPT fallback, "
-        "%d via proximity",
-        file_path.name, section_hits, fallback_uses,
+        "BOUNDED-METRICS for %s — %d adopted from gate, %d via section reader, "
+        "%d via GPT fallback, %d via proximity",
+        file_path.name, len(pre), section_hits, fallback_uses,
         len(bounded) - section_hits - fallback_uses,
     )
+
+    # Fold the gate-adopted records back in.
+    bounded_metrics = {**pre, **bounded_metrics}
 
     # Identity checks intentionally do NOT run here. They must run once, after
     # reconciliation has normalized/derived final values.
 
-    # Cache the result
-    extraction_cache.save_cache(
-        cache_key=cache_key,
-        file_name=file_path.name,
-        file_hash=file_hash,
-        catalog_version=CATALOG_VERSION,
-        extractor_version=EXTRACTOR_VERSION,
-        resolver_version=RESOLVER_VERSION,
-        bounded_metrics=bounded_metrics,
-    )
+    # Cache the result — but never cache a prefilled run: it embeds this
+    # session's gate state, and the file-hash key would serve it to ingests
+    # that never saw that gate.
+    if not pre:
+        extraction_cache.save_cache(
+            cache_key=cache_key,
+            file_name=file_path.name,
+            file_hash=file_hash,
+            catalog_version=CATALOG_VERSION,
+            extractor_version=EXTRACTOR_VERSION,
+            resolver_version=RESOLVER_VERSION,
+            bounded_metrics=bounded_metrics,
+        )
 
     # Counts for diagnostic logging
     statuses: dict[str, int] = {}
@@ -805,7 +848,11 @@ def _years_between(d1, d2):
     return abs((b - a).days) / 365.25
 
 
-def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
+def ingest_to_ssot_with_layer(
+    filename: str,
+    layer: str,
+    prefilled_bounded: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Classify + extract + GPT insight pass + write to SSOT.
 
@@ -817,6 +864,10 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     Pass 2 runs at ingest time so every downstream scenario benefits automatically.
     It uses gpt-4o-mini to stay cheap (~$0.01–0.02 per file).
     If no API key is set, Pass 2 is silently skipped.
+
+    `prefilled_bounded` (optional): Stage-1 gate records keyed by metric_name.
+    Bounded metrics already resolved at the audit gate are adopted instead of
+    re-extracted — see _run_bounded_extraction.
     """
     if layer not in ssot.KNOWN_LAYERS:
         return {"error": f"Unknown layer: {layer!r}. Valid: {sorted(ssot.KNOWN_LAYERS)}"}
@@ -860,6 +911,7 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
             file_path,
             layer,
             sheet_classification=sheet_inventory.get("content_roles") or None,
+            prefilled=prefilled_bounded,
         )
     except Exception as e:
         _log.error("BOUNDED-METRICS failed for %s — %s: %s", filename, type(e).__name__, e)
